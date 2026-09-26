@@ -36,7 +36,7 @@ classifiers = [
 dev = ["pytest>=8"]
 
 [project.urls]
-Homepage = "https://github.com/jarvis959/galvanize"
+Homepage = "https://github.com/lychee888/galvanize"
 
 [project.scripts]
 galvanize = "galvanize.cli:main"

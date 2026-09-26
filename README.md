@@ -9,9 +9,9 @@ galvanize watches the real world (new mail, a file landing in a folder, a git co
 Works on Windows, macOS, and Linux (Python 3.10+). No cloning needed; one command installs straight from GitHub:
 
 ```bash
-pipx install "git+https://github.com/jarvis959/galvanize.git"
-# or: uv tool install --from "git+https://github.com/jarvis959/galvanize.git" galvanize
-# or: pip install git+https://github.com/jarvis959/galvanize.git
+pipx install "git+https://github.com/lychee888/galvanize.git"
+# or: uv tool install --from "git+https://github.com/lychee888/galvanize.git" galvanize
+# or: pip install git+https://github.com/lychee888/galvanize.git
 ```
 
 Then run setup once:
@@ -70,7 +70,7 @@ The agent's own `trigger_add` tool is the primary creation path; the CLI is the 
 ## Development
 
 ```bash
-git clone https://github.com/jarvis959/galvanize && cd galvanize
+git clone https://github.com/lychee888/galvanize && cd galvanize
 python -m venv .venv && .venv/bin/pip install -e ".[dev]"   # Scripts/ on Windows
 .venv/bin/pytest                     # unit suite; live-lane + docker tests skip cleanly
 ```
