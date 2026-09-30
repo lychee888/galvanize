@@ -85,7 +85,8 @@ class RelayWatcher:
                 # Legacy collector callbacks return None; the daemon returns a tuple.
                 ok, detail = (True, '') if result is None else result
                 if str(detail).startswith(('skipped: cooldown', 'skipped: dedupe in-flight')):
-                    ok = False  # throttling is not a delivery acknowledgement
+                    self.state.defer(event_id, now=now)
+                    continue  # No delivery was attempted; keep the failure budget.
                 self.state.finish(event_id, 'ack' if ok else 'pending', '' if ok else str(detail), now=now)
             except Exception as exc:
                 self.state.finish(event_id, 'pending', f'{type(exc).__name__}: {exc}', now=now)

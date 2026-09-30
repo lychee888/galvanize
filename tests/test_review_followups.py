@@ -181,7 +181,86 @@ def test_relay_does_not_acknowledge_a_throttled_retry(detail):
     watcher.emit_by_route = lambda *a: (True, detail)
     watcher.process_pending(now=3)
     assert watcher.state.cursor() == '0'
-    assert watcher.state.failures()[0]['attempts'] == 2
+    assert watcher.state.failures()[0]['attempts'] == 1
     watcher.emit_by_route = lambda *a: (True, 'delivered')
     watcher.process_pending(now=8)
     assert watcher.state.cursor() == '001'
+
+
+def test_relay_waits_through_full_cooldown_without_exhausting_attempts(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr('galvanize.bus.time.time', lambda: clock[0])
+    delivered = []
+    monkeypatch.setattr('galvanize.bus.dispatch_mod.dispatch',
+                        lambda t, e, p: (delivered.append(e.payload['event_id']) is None, 'delivered'))
+    trigger = Trigger('test', {'type': 'webhook', 'relay': True},
+                      {'kind': 'shell', 'command': 'unused'}, cooldown_s=60)
+    bus = TriggerBus()
+    watcher = RelayWatcher('https://relay.invalid', 't', lambda r, e: bus.handle(trigger, e))
+    watcher.state.stage([event('001'), event('002')], '002')
+    for elapsed in range(0, 60, 2):
+        clock[0] = 1000 + elapsed
+        watcher.process_pending(now=clock[0])
+    assert delivered == ['001']
+    assert watcher.state.cursor() == '001'
+    assert watcher.state.pending(now=1060)[0]['attempts'] == 0
+    assert not watcher.state.failures()
+    # A normal restart must preserve the deferred event and its budget.
+    watcher = RelayWatcher(watcher.url, 't', lambda r, e: bus.handle(trigger, e))
+    clock[0] = 1060
+    watcher.process_pending(now=clock[0])
+    assert delivered == ['001', '002']
+    assert watcher.state.cursor() == '002'
+
+
+def test_relay_waits_for_long_inflight_wake_and_keeps_real_failure_budget(monkeypatch):
+    started, release = threading.Event(), threading.Event()
+    def dispatch(t, e, p):
+        started.set()
+        assert release.wait(10)
+        return False, 'cannot spawn'
+    monkeypatch.setattr('galvanize.bus.dispatch_mod.dispatch', dispatch)
+    trigger = Trigger('test', {'type': 'emit'}, {'kind': 'shell', 'command': 'unused'}, dedupe_key='{key}')
+    bus = TriggerBus()
+    watcher = RelayWatcher('https://relay.invalid', 't', lambda r, e: bus.handle(trigger, e))
+    watcher.state.stage([event(body={'key': 'shared'})], '001')
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        wake = pool.submit(bus.handle, trigger, Event('test', 'emit', 'test', {'key': 'shared'}))
+        try:
+            assert started.wait(5)
+            for now in range(0, 62, 2):
+                watcher.process_pending(now=now)
+            assert watcher.state.cursor() == '0'
+            assert watcher.state.pending(now=62)[0]['attempts'] == 0
+        finally:
+            release.set()
+        assert wake.result() == (False, 'cannot spawn')
+    for now in (62, 64, 68, 76, 92):
+        watcher.process_pending(now=now)
+    assert watcher.state.failures()[0]['state'] == 'failed'
+    assert watcher.state.failures()[0]['attempts'] == 5
+    assert watcher.state.retry('001')
+    monkeypatch.setattr('galvanize.bus.dispatch_mod.dispatch', lambda *a: (True, 'recovered'))
+    watcher.process_pending(now=94)
+    assert watcher.state.cursor() == '001'
+
+
+def test_deferred_batch_cannot_starve_a_later_healthy_route():
+    delivered = []
+    def emit(route, evt):
+        if route == 'blocked':
+            return True, 'skipped: cooldown (0s < 60s)'
+        delivered.append(evt.payload['event_id'])
+        return True, 'delivered'
+    watcher = RelayWatcher('https://relay.invalid', 't', emit)
+    watcher.state.stage([event(f'{i:03}', route='blocked') for i in range(100)]
+                        + [event('100', route='healthy')], '100')
+    watcher.process_pending(now=0)
+    assert not delivered
+    watcher.process_pending(now=2)
+    assert delivered == ['100']
+    assert watcher.state.cursor() == '0'  # Deferred items remain unacknowledged.
+    for now in range(4, 30, 2):
+        watcher.process_pending(now=now)
+    assert delivered == ['100']
+    assert not watcher.state.failures()

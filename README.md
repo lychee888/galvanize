@@ -107,8 +107,10 @@ consistent; this change does not make its timestamp cursor a transactional queue
 Failed dispatches retry up to five times with bounded exponential delay (2, 4,
 8, 16 seconds before exhaustion). `galvanize status` and `trigger_status` expose
 event ID, attempts, and error. After fixing the cause, use
-`galvanize relay-retry <event-id>` to grant another five attempts. Malformed
-records are quarantined individually and remain visible. The Worker wraps
+`galvanize relay-retry <event-id>` to grant another five attempts. Cooldown and
+in-flight deduplication deferrals remain pending and are checked again after
+two seconds without spending a failed-dispatch attempt. Malformed records are
+quarantined individually and remain visible. The Worker wraps
 non-object JSON as `{"value": ...}` and non-JSON text as `{"raw": ...}`; the
 reader also normalizes retained records from older Workers.
 

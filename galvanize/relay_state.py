@@ -58,7 +58,7 @@ class RelayState:
     def pending(self, now=None):
         with self.db() as db:
             return [dict(row) for row in db.execute(
-                "SELECT * FROM events WHERE state='pending' AND next_attempt<=? ORDER BY id LIMIT 100",
+                "SELECT * FROM events WHERE state='pending' AND next_attempt<=? ORDER BY next_attempt,id LIMIT 100",
                 (time.time() if now is None else now,))]
 
     def finish(self, event_id, state, error='', max_attempts=5, now=None):
@@ -79,6 +79,13 @@ class RelayState:
                     break
                 cursor = item['id']
             db.execute('INSERT OR REPLACE INTO meta VALUES (?,?)', ('ack', cursor))
+
+    def defer(self, event_id, now=None, delay=2):
+        """Wait for a gate without consuming dispatch attempts or acknowledging."""
+        now = time.time() if now is None else now
+        with self.db() as db:
+            db.execute("UPDATE events SET next_attempt=? WHERE id=? AND state='pending'",
+                       (now + max(2, delay), event_id))
 
     def failures(self):
         with self.db() as db:
