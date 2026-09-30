@@ -192,6 +192,9 @@ def add_trigger(
     else:
         return {"ok": False, "error": f"unknown wake kind '{wake}'"}
 
+    if kind == "webhook" and wake_cfg["kind"] != "hermes" and not source.get("relay"):
+        return {"ok": False, "error": "Webhook shell wakes need a relay receiver (--relay); no webhook URL was created"}
+
     t = Trigger(
         name=name,
         source=source,
@@ -270,7 +273,9 @@ def add_trigger(
         lines.append("Events arrive straight from the source service into Hermes — "
                      "no daemon needed for this trigger.")
     elif kind == "webhook":
+        url = f"{relay_url.rstrip('/')}/ingest/{name}"
         lines.append(f"Queue URL for the source service: {relay_url.rstrip('/')}/ingest/{name}")
+        lines.append("Configure the worker INGEST_TOKEN and send Authorization: Bearer <INGEST_TOKEN> on submissions.")
         lines.append("Your daemon pulls the queue — keep it running (it already starts at login).")
     elif kind == "imap":
         lines.append(f"Watching {source['user']}@{source['host']}:"
