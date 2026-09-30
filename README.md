@@ -63,6 +63,22 @@ galvanize add git-hook ~/code/myrepo --wake codex   # wake Codex on commits
 galvanize add folder ~/watch --wake shell --command 'myagent run "{prompt}"'
 ```
 
+Commands containing `{prompt}` or `{payload}` run as an executable plus literal arguments. Event text is never interpolated into a shell command. Use a script for pipelines or redirection, and read `GALVANIZE_PROMPT` / `GALVANIZE_PAYLOAD` inside it. On Windows, npm command shims are resolved to their Node entry point; other batch files need an explicit executable or interpreter.
+
+### Relay webhooks
+
+DSH and other shell wakes require a relay for webhooks. Deploy `relay/worker.js` with a `RELAY` KV binding and two distinct secrets: `RELAY_TOKEN` for the daemon to read events, and `INGEST_TOKEN` for senders to submit events. Set both using `wrangler secret put` before deploying.
+
+```bash
+galvanize add webhook --name incoming --wake dsh \
+  --relay https://your-relay.workers.dev --relay-token "$RELAY_TOKEN"
+curl -X POST https://your-relay.workers.dev/ingest/incoming \
+  -H "Authorization: Bearer $INGEST_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"message":"hello"}'
+```
+
+The supplied worker requires the ingestion bearer header. Providers that cannot send it need an adapter that validates their native signature before forwarding; pointing their unauthenticated webhook directly at the worker will return 401. Existing deployments must configure `INGEST_TOKEN` and update senders when installing this worker revision.
+
 ## Daily use
 
 The agent's own `trigger_add` tool is the primary creation path; the CLI is the fallback for use without an agent. Both write the same `~/.galvanize/triggers.yaml`, and the dashboard tab manages what either creates.

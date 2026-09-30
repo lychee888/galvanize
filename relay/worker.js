@@ -7,9 +7,11 @@
  * Deploy (the user owns it — no vendor in the middle):
  *   1. wrangler new -> replace worker.js with this file
  *   2. wrangler kv namespace create RELAY
- *   3. set secrets:  wrangler secret put RELAY_TOKEN   (the shared token)
+ *   3. set secrets: wrangler secret put RELAY_TOKEN   (queue reads)
+ *                   wrangler secret put INGEST_TOKEN  (submissions)
  *   4. wrangler deploy
- *   5. galvanize add webhook mysvc --wake hermes --relay https://<name>.<sub>.workers.dev
+ *   5. galvanize add webhook --name mysvc --wake dsh --relay https://<name>.<sub>.workers.dev --relay-token <RELAY_TOKEN>
+ *   6. senders POST with Authorization: Bearer <INGEST_TOKEN>
  *
  * Storage: KV, key = zero-padded timestamp+random, value = event JSON.
  * Events expire after TTL_DAYS. Pollers page with the `since` cursor.
@@ -28,11 +30,15 @@ export default {
     // POST /ingest/<route>  — external services (GitHub/Stripe/etc.) call this.
     // Route path is echoed back so the daemon knows which trigger to fire.
     if (request.method === "POST" && url.pathname.startsWith("/ingest/")) {
+      // Separate ingestion credentials from the credential used to read mail.
+      const ingestToken = env.INGEST_TOKEN;
+      if (!ingestToken) return json(503, { error: "INGEST_TOKEN is not configured" });
+      if (token !== ingestToken) return json(401, { error: "unauthorized" });
       const route = url.pathname.slice("/ingest/".length).replace(/[^a-z0-9_-]/g, "");
+      if (!route) return json(400, { error: "route required" });
       const body = await request.text();
       if (body.length > 200000) return json(413, { error: "payload too large" });
-      // Ingest URL itself is the shared secret (capability-by-URL): the path
-      // carries no token, so callers just POST. Keep the URL private.
+      // Senders must provide Authorization: Bearer <INGEST_TOKEN>.
       const key = String(Date.now()).padStart(14, "0") + "-" + crypto.randomUUID().slice(0, 8);
       await env.RELAY.put(key, JSON.stringify({ route, body, ts: Date.now() }),
                           { expirationTtl: 60 * 60 * 24 * (env.TTL_DAYS || 7) });

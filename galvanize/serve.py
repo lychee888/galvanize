@@ -224,8 +224,6 @@ def running_info(probe: bool = True) -> Optional[dict]:
     info = server_info()
     if not info:
         return None
-    if time.time() - float(info.get("ts", 0)) > 6 * 3600:
-        return None
     if not probe:
         return info
     try:

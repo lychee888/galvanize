@@ -39,7 +39,7 @@ class TriggerBus:
                 pending = key
                 prev = self._seen_keys.get(t.name)
                 if prev and prev[1] == key and (
-                    not t.cooldown_s or now - prev[0] < t.cooldown_s
+                    now - prev[0] < 2.0
                 ):
                     return f"dedupe '{key}'", None
             if t.cooldown_s:
