@@ -33,7 +33,7 @@ WAKE_PRESETS = {
     # workspace-write: "a file landed, do something with it" needs file
     # writes; PLAN §4.1 pre-declares this in config (never auto-elevates).
     "codex": 'codex exec --skip-git-repo-check --sandbox workspace-write "{prompt}"',
-    "dsh": 'dsh --profile web "{prompt}"',
+    "dsh": 'dsh --profile headless "{prompt}"',
 }
 
 
@@ -127,6 +127,7 @@ class GlobalConfig:
     hermes_deliver: str = "log"
     hermes_home_override: str = ""
     relay_url: str = ""
+    dsh_wake_profile: str = "headless"
 
     @classmethod
     def load(cls) -> "GlobalConfig":
@@ -141,6 +142,7 @@ class GlobalConfig:
             hermes_deliver=str(d.get("hermes_deliver", "log")),
             hermes_home_override=str(d.get("hermes_home_override", "")),
             relay_url=str(d.get("relay_url", "") or ""),
+            dsh_wake_profile=str(d.get("dsh_wake_profile", "headless") or "headless"),
         )
 
     def save(self) -> None:
@@ -151,6 +153,7 @@ class GlobalConfig:
                 "hermes_deliver": self.hermes_deliver,
                 "hermes_home_override": self.hermes_home_override or None,
                 "relay_url": self.relay_url or None,
+                "dsh_wake_profile": self.dsh_wake_profile,
             },
         )
 

@@ -36,8 +36,15 @@ export default {
       if (token !== ingestToken) return json(401, { error: "unauthorized" });
       const route = url.pathname.slice("/ingest/".length).replace(/[^a-z0-9_-]/g, "");
       if (!route) return json(400, { error: "route required" });
-      const body = await request.text();
+      let body = await request.text();
       if (body.length > 200000) return json(413, { error: "payload too large" });
+      // Normalize non-object JSON before queueing; readers also handle old entries.
+      try {
+        const parsed = JSON.parse(body);
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          body = JSON.stringify({ value: parsed });
+        }
+      } catch { body = JSON.stringify({ raw: body }); }
       // Senders must provide Authorization: Bearer <INGEST_TOKEN>.
       const key = String(Date.now()).padStart(14, "0") + "-" + crypto.randomUUID().slice(0, 8);
       await env.RELAY.put(key, JSON.stringify({ route, body, ts: Date.now() }),

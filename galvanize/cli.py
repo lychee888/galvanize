@@ -305,6 +305,7 @@ def cmd_add(args) -> int:
         events=events,
         cooldown_s=args.cooldown,
         workdir=args.workdir or "",
+        wake_profile=getattr(args, "wake_profile", "") or "",
         imap_host=getattr(args, "host", "") or "",
         folder=getattr(args, "folder", "") or "",
         password=password,
@@ -402,6 +403,11 @@ def cmd_status(args) -> int:
         print()
         for n in s["notes"]:
             print(f"  ! {n}")
+    for failure in s.get('relay_failures', []):
+        print(f"  ! relay {failure['id']}: {failure['state']} after {failure['attempts']} attempt(s): {failure['error']}")
+    for row in s['triggers']:
+        if row.get('watcher_error'):
+            print(f"  ! {row['name']}: {row['watcher_error']}")
     print()
     return 0
 
@@ -534,6 +540,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--deliver", default="", help="hermes delivery target (telegram, discord, ...)")
     sp.add_argument("--command", default="", help="shell wake command, e.g. 'claude -p \"{prompt}\"'")
     sp.add_argument("--workdir", default="", help="run shell command in this directory")
+    sp.add_argument("--wake-profile", default="", help="DSH profile (default: shared configured profile, initially headless)")
     sp.add_argument("--prompt", default="", help="what to tell the agent ({file} = filename, {path} = full path)")
     sp.add_argument("--patterns", default="", help="comma-separated globs, e.g. '*.step,*.stl'")
     sp.add_argument("--events", default="", help="webhook kind: accepted event types")
@@ -564,6 +571,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("status", help="what is watched, when it last fired, what broke")
     sp.set_defaults(fn=cmd_status)
+
+    sp = sub.add_parser('relay-retry', help='retry an exhausted relay event after fixing its wake')
+    sp.add_argument('id')
+    def retry_event(args):
+        result = manage.retry_relay_event(args.id)
+        print(json.dumps(result))
+        return 0 if result['ok'] else 1
+    sp.set_defaults(fn=retry_event)
 
     sp = sub.add_parser("run", help="run the daemon in the foreground (watchers)")
     sp.add_argument("--verbose", action="store_true")

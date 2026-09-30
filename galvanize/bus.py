@@ -28,6 +28,7 @@ class TriggerBus:
         self._last_fire: Dict[str, float] = {}      # successful dispatches
         self._last_attempt: Dict[str, float] = {}   # for cooldown throttling
         self._seen_keys: Dict[str, Tuple[float, str]] = {}  # trigger -> (ts, key)
+        self._inflight: set[tuple[str, str]] = set()
 
     def _gate(self, t: Trigger, event: Event) -> Tuple[Optional[str], Optional[str]]:
         """Return (skip_reason, pending_dedupe_key). skip_reason None -> fire."""
@@ -37,6 +38,8 @@ class TriggerBus:
             if t.dedupe_key:
                 key = render(t.dedupe_key, event.payload)
                 pending = key
+                if (t.name, key) in self._inflight:
+                    return f"dedupe in-flight '{key}'", None
                 prev = self._seen_keys.get(t.name)
                 if prev and prev[1] == key and (
                     now - prev[0] < 2.0
@@ -47,6 +50,8 @@ class TriggerBus:
                 if now - last < t.cooldown_s:
                     return f"cooldown ({int(now - last)}s < {int(t.cooldown_s)}s)", None
             self._last_attempt[t.name] = now
+            if pending is not None:
+                self._inflight.add((t.name, pending))
         return None, pending
 
     def handle(self, t: Trigger, event: Event) -> Tuple[bool, str]:
@@ -57,16 +62,21 @@ class TriggerBus:
         if reason:
             logger.info("skip %s: %s", t.name, reason)
             return True, f"skipped: {reason}"
-        prompt = render(t.prompt, event.payload)
-        ok, detail = dispatch_mod.dispatch(t, event, prompt)
-        if ok:
+        try:
+            prompt = render(t.prompt, event.payload)
+            ok, detail = dispatch_mod.dispatch(t, event, prompt)
             with self._lock:
-                self._last_fire[t.name] = time.time()
+                if ok:
+                    self._last_fire[t.name] = time.time()
+                    if pending_key is not None:
+                        self._seen_keys[t.name] = (time.time(), pending_key)
+            if not ok:
+                logger.warning("dispatch failed for %s: %s", t.name, detail)
+            return ok, detail
+        finally:
+            with self._lock:
                 if pending_key is not None:
-                    self._seen_keys[t.name] = (time.time(), pending_key)
-        else:
-            logger.warning("dispatch failed for %s: %s", t.name, detail)
-        return ok, detail
+                    self._inflight.discard((t.name, pending_key))
 
     def handle_named(self, trigger_name: str, event: Event) -> Tuple[bool, str]:
         ts = load_triggers()

@@ -41,8 +41,14 @@ TOOLS = [
                 "app_password": {"type": "string", "description": "imap only: mailbox app-password (stored in OS keyring)"},
                 "subject_filter": {"type": "string", "description": "imap only: subject must contain this text"},
                 "cooldown_s": {"type": "number"},
+                "wake": {"type": "string", "enum": ["hermes", "claude", "codex", "dsh", "shell"], "description": "Explicit target for the new agent session."},
+                "command": {"type": "string"},
+                "workdir": {"type": "string"},
+                "wake_profile": {"type": "string", "description": "DSH profile override; otherwise use the shared configured profile."},
+                "relay_url": {"type": "string"},
+                "relay_token": {"type": "string", "description": "Queue read credential (RELAY_TOKEN), not INGEST_TOKEN."},
             },
-            "required": ["kind"],
+            "required": ["kind", "wake"],
         },
     },
     {"name": "trigger_list", "description": "List all triggers with source, wake mode, filters.",
@@ -62,12 +68,19 @@ def _call_tool(name: str, args: Dict[str, Any]) -> str:
     from galvanize import manage
 
     if name == "trigger_add":
+        if not args.get("wake"):
+            return json.dumps({"ok": False, "error": "Choose an explicit wake target: hermes, claude, codex, dsh, or shell"})
         target = str(args.get("target", ""))
         kind = str(args.get("kind", ""))
         r = manage.add_trigger(
             kind, target,
             name=str(args.get("name", "")),
-            wake=str(args.get("wake", "hermes")),
+            wake=str(args["wake"]),
+            command=str(args.get("command", "")),
+            workdir=str(args.get("workdir", "")),
+            relay_url=str(args.get("relay_url", "")),
+            relay_token=str(args.get("relay_token", "")),
+            wake_profile=str(args.get("wake_profile", "")),
             deliver=str(args.get("deliver", "")),
             prompt=str(args.get("prompt", "")),
             patterns=args.get("patterns") or None,
