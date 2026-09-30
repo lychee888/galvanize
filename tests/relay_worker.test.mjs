@@ -33,3 +33,15 @@ test('ingestion and queue access require separate credentials', async () => {
     headers: { authorization: 'Bearer read-secret' },
   }), env)).json()).events.length, 0);
 });
+
+for (const value of [[1, 2], 42, 'hello', null]) {
+  test(`normalizes JSON ${JSON.stringify(value)} before storage`, async () => {
+    let saved;
+    const env = { INGEST_TOKEN: 'write', RELAY: { async put(k, v) { saved = JSON.parse(v); } } };
+    const response = await worker.fetch(new Request('https://relay.example/ingest/demo', {
+      method: 'POST', headers: { authorization: 'Bearer write' }, body: JSON.stringify(value),
+    }), env);
+    assert.equal(response.status, 200);
+    assert.deepEqual(JSON.parse(saved.body), { value });
+  });
+}

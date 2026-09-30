@@ -28,6 +28,7 @@ from typing import Any, Callable, Dict, Optional
 from imap_tools import MailBox, MailBoxUnencrypted, ImapToolsError
 
 from ..events import Event
+from .. import state as health_state
 from ..paths import ensure_home, galvanize_home
 
 logger = logging.getLogger("galvanize.imap")
@@ -133,10 +134,13 @@ class ImapWatcher:
             except Exception as e:
                 self.connected = False
                 self.last_error = f"{type(e).__name__}: {e}"
+                health_state.set_source_health('imap:' + self.name, False, self.last_error)
                 logger.warning("imap %s: %s (retry in %.0fs)",
                                self.name, self.last_error, backoff)
                 self._stop.wait(backoff)
                 backoff = min(backoff * 2, MAX_BACKOFF_S)
+        self.connected = False
+        health_state.set_source_health('imap:' + self.name, False, 'stopped')
 
     def _session(self) -> None:
         box = self._open()
@@ -149,6 +153,7 @@ class ImapWatcher:
                 anchor = self._anchor(box, uidv)  # first run / reshuffle: no replay
             self.connected = True
             self.last_error = None
+            health_state.set_source_health('imap:' + self.name, True)
             logger.info("imap %s: connected, anchor uid>%s (uidvalidity %s)",
                         self.name, anchor, uidv)
             self._idle_forever(box)
@@ -190,13 +195,17 @@ class ImapWatcher:
         re-issue, and a new-message notification is acted on within ~1s.
         """
         anchor = _STATE.get(self.name).get("last_uid", 0)
+        last_health = 0.0
         while not self._stop.is_set():
             box.idle.start()
             deadline = time.time() + IDLE_REARM_S
             try:
                 while time.time() < deadline and not self._stop.is_set():
+                    if time.time() - last_health >= 15:
+                        health_state.set_source_health('imap:' + self.name, True)
+                        last_health = time.time()
                     if box.idle.poll(timeout=0):
-                        anchor = self._drain(box, anchor, emit=True)
+                        break  # DONE must precede SEARCH/FETCH on this connection.
                     self._stop.wait(1.0)
             finally:
                 box.idle.stop()

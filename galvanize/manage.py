@@ -82,6 +82,7 @@ def add_trigger(
     from_filter: str = "",
     relay_url: str = "",
     relay_token: str = "",
+    wake_profile: str = "",
 ) -> Dict[str, Any]:
     """Create a trigger. kind: folder | webhook | emit | imap.
 
@@ -174,7 +175,14 @@ def add_trigger(
     wake_cfg: Dict[str, Any] = {"kind": wake}
     from .config import WAKE_PRESETS
     if wake in WAKE_PRESETS:
-        wake_cfg = {"kind": "shell", "command": command or WAKE_PRESETS[wake],
+        preset = WAKE_PRESETS[wake]
+        if wake == "dsh":
+            import re
+            profile = wake_profile or GlobalConfig.load().dsh_wake_profile
+            if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", profile):
+                return {"ok": False, "error": "invalid DSH wake profile"}
+            preset = f'dsh --profile {profile} "{{prompt}}"'
+        wake_cfg = {"kind": "shell", "command": command or preset,
                     "harness": wake}
         if workdir:
             wake_cfg["workdir"] = workdir
@@ -369,6 +377,15 @@ def status() -> Dict[str, Any]:
     rows: List[Dict[str, Any]] = []
     for name, t in sorted(ts.items()):
         st = state_mod.get(name)
+        health = {}
+        if t.source_type in ('folder', 'imap') or t.source.get('relay'):
+            key = 'relay' if t.source.get('relay') else f'{t.source_type}:{name}'
+            health = state_mod.source_health(key, hb.get('pid') if hb else None)
+            watching = daemon_alive and bool(health.get('connected'))
+        elif t.source_type == 'webhook':
+            watching = hermes_mod.webhook_enabled() and hermes_mod.gateway_running()
+        else:
+            watching = False  # manual emit has no background listener
         row = {
             "name": name,
             "source": t.source_type,
@@ -376,7 +393,8 @@ def status() -> Dict[str, Any]:
             "enabled": t.enabled,
             "description": t.description,
             "prompt": t.prompt,
-            "watching": (t.enabled and t.source_type != "folder") or (daemon_alive and t.enabled),
+            "watching": bool(t.enabled and watching),
+            "watcher_error": health.get('error') if health else None,
             "last_fire": _fmt_age(st.get("last_fire")),
             "fires_today": int(st.get("fires_today", 0) or 0),
             "last_error": st.get("last_error"),
@@ -405,7 +423,21 @@ def status() -> Dict[str, Any]:
         "gateway_running": (hermes_mod.gateway_running() if wh_enabled else False),
         "triggers": rows,
         "notes": notes,
+        "relay_failures": relay_failures(),
     }
+
+
+def relay_failures() -> list:
+    from .relay_state import RelayState
+    url = GlobalConfig.load().relay_url
+    return RelayState(url).failures() if url else []
+
+
+def retry_relay_event(event_id: str) -> dict:
+    from .relay_state import RelayState
+    url = GlobalConfig.load().relay_url
+    ok = bool(url and RelayState(url).retry(event_id))
+    return {'ok': ok, **({} if ok else {'error': 'No failed event with that id'})}
 
 
 # ------------------------------------------------------------------ doctor

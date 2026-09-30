@@ -112,6 +112,8 @@ class Daemon:
             watcher.start()
             self._watcher = watcher
             self._folder_triggers = sig
+            for name in sig:
+                state.set_source_health('folder:' + name, True)
             logger.info("watching %d folder trigger(s): %s", len(sig), ", ".join(sig) or "(none)")
         self._rebuild_imap_watchers(triggers)
         self._rebuild_relay(trigger_has_relay=any(
@@ -130,10 +132,11 @@ class Daemon:
                 have.stop()
             token = secrets_mod.get_secret("relay:token") or ""
 
-            def _emit_by_route(route: str, evt) -> None:
+            def _emit_by_route(route: str, evt):
                 ok, detail = self.bus.handle_named(route, evt)
                 if not ok:
                     logger.error("relay route %s: %s", route, detail)
+                return ok, detail
 
             self._relay = RelayWatcher(url, token, _emit_by_route)
             self._relay.start()
@@ -198,8 +201,13 @@ class Daemon:
                         logger.exception("watcher rebuild failed — retrying next poll")
                 if time.time() - last_beat >= 15:
                     state.set_heartbeat()
+                    for name in self._folder_triggers:
+                        state.set_source_health('folder:' + name, bool(self._watcher and self._watcher._observer.is_alive()))
                     last_beat = time.time()
         finally:
+            relay = getattr(self, '_relay', None)
+            if relay is not None:
+                relay.stop()
             if self._watcher:
                 self._watcher.stop()
             for w, _ in self._imap_watchers.values():

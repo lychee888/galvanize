@@ -113,6 +113,18 @@ def call_op(op: str, body: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": True, "triggers": {n: t.to_dict() for n, t in ts.items()}}
     if op == "status":
         return manage.status()
+    if op == 'configure_dsh_profile':
+        import re
+        from .config import GlobalConfig
+        profile = str(body.get('wake_profile', ''))
+        if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', profile):
+            raise ApiError(400, 'invalid DSH wake profile')
+        gc = GlobalConfig.load()
+        gc.dsh_wake_profile = profile
+        gc.save()
+        return {'ok': True, 'wake_profile': profile}
+    if op == 'retry_relay':
+        return manage.retry_relay_event(str(body.get('id', '')))
     if op == "add":
         kw = dict(body)
         kind = kw.pop("kind", "")

@@ -59,6 +59,14 @@ galvanize add git-hook ~/code/myrepo --wake codex   # wake Codex on commits
 
 ### Any other CLI agent
 
+`galvanize add ... --wake dsh` defaults to `dsh --profile headless "{prompt}"`.
+The DSH plugin installer saves a custom `--wake-profile` into both its runtime
+profiles and the core's `dsh_wake_profile` setting, so future CLI and plugin
+triggers agree. The CLI also accepts `--wake-profile <name>` for one trigger.
+Existing triggers retain their saved commands. MCP `trigger_add` requires an
+explicit `wake` target and accepts `command`, `workdir`, `wake_profile`,
+`relay_url`, and `relay_token`; it does not silently choose Hermes.
+
 ```bash
 galvanize add folder ~/watch --wake shell --command 'myagent run "{prompt}"'
 ```
@@ -79,6 +87,38 @@ curl -X POST https://your-relay.workers.dev/ingest/incoming \
 
 The supplied worker requires the ingestion bearer header. Providers that cannot send it need an adapter that validates their native signature before forwarding; pointing their unauthenticated webhook directly at the worker will return 401. Existing deployments must configure `INGEST_TOKEN` and update senders when installing this worker revision.
 
+Relay receipt and delivery are persisted separately in per-URL SQLite inboxes
+under `GALVANIZE_HOME` (default `~/.galvanize`). A page and its receipt cursor
+commit together before dispatch. The delivery acknowledgement advances only
+past successful or explicitly quarantined events. A failed wake never advances
+that acknowledgement; later received events can still run. Normal restarts
+resume pending work and do not replay acknowledged IDs, including retained
+history returned again by the relay.
+
+Delivery is **at least once**, not exactly once: a crash after a wake's external
+side effect but before the acknowledgement commit can repeat it. Every payload
+includes the stable relay `event_id`; use that ID for idempotent side effects.
+Keep the inbox files when restarting. Deleting them intentionally resets replay
+protection. IDs are retained without automatic pruning; monitor disk usage for
+long-running, high-volume deployments. Events not received before the Worker's
+retention period expires cannot be recovered locally. Cloudflare KV is eventually
+consistent; this change does not make its timestamp cursor a transactional queue.
+
+Failed dispatches retry up to five times with bounded exponential delay (2, 4,
+8, 16 seconds before exhaustion). `galvanize status` and `trigger_status` expose
+event ID, attempts, and error. After fixing the cause, use
+`galvanize relay-retry <event-id>` to grant another five attempts. Cooldown and
+in-flight deduplication deferrals remain pending and are checked again after
+two seconds without spending a failed-dispatch attempt. Malformed records are
+quarantined individually and remain visible. The Worker wraps
+non-object JSON as `{"value": ...}` and non-JSON text as `{"raw": ...}`; the
+reader also normalizes retained records from older Workers.
+
+`watching` requires a fresh, connected watcher and a live daemon for folder,
+IMAP, and relay sources. Direct Hermes webhooks use gateway health instead;
+manual emit triggers have no watcher. IMAP exits IDLE with DONE before searching
+or fetching mail, then re-enters IDLE after draining.
+
 ## Daily use
 
 The agent's own `trigger_add` tool is the primary creation path; the CLI is the fallback for use without an agent. Both write the same `~/.galvanize/triggers.yaml`, and the dashboard tab manages what either creates.
@@ -91,6 +131,6 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev]"   # Scripts/ on Window
 .venv/bin/pytest                     # unit suite; live-lane + docker tests skip cleanly
 ```
 
-The live Hermes-lane test runs inside a Hermes checkout's venv (`pytest tests/test_live_hermes_lane.py`); the IMAP suite drives a GreenMail container and skips when Docker is unavailable.
+The live Hermes-lane test runs inside a Hermes checkout's venv (`pytest tests/test_live_hermes_lane.py`); the IMAP suite drives a GreenMail container and skips when Docker is unavailable. `test_imap_protocol.py` always exercises the real IMAP client over TCP against a strict test server that rejects commands during IDLE. Relay Worker tests execute the actual JavaScript with a memory-backed KV fixture, not a Cloudflare deployment.
 
 MIT licensed. Built for the Hermes ecosystem; architecture is harness-neutral.
