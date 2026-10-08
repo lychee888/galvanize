@@ -21,6 +21,16 @@ def test_register_route_writes_subs_file(isolated_homes, hermes_cfg):
     assert subs["cad-drops"]["prompt"] == "{prompt}"
 
 
+def test_register_route_splits_chat_id_from_deliver(isolated_homes, hermes_cfg):
+    # The Hermes lane parses `deliver` as a bare platform name; "telegram:123"
+    # passed the whole string to Platform(), every fire died at send time with
+    # "Unknown deliver type" (2026-10-07: all imap triggers fired, none delivered).
+    H.register_route("chat-split", "s", deliver="telegram:1683557816")
+    subs = json.loads((isolated_homes["hermes"] / "webhook_subscriptions.json").read_text())
+    assert subs["chat-split"]["deliver"] == "telegram"
+    assert subs["chat-split"]["deliver_extra"] == {"chat_id": "1683557816"}
+
+
 def test_route_empty_events_is_allow_all(isolated_homes, hermes_cfg):
     # webhook-kind routes pass events=[] to mean "accept any event type" —
     # a falsy-coercion bug used to rewrite that into the ["galvanize"]

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "galvanize"
-version = "0.2.0"
+version = "0.2.1"
 description = "Event-driven activation points for AI agents: wake a fresh Hermes (or any CLI agent) session when something happens."
 readme = "README.md"
 requires-python = ">=3.10"

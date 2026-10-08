@@ -143,6 +143,10 @@ def register_route(
             f"route name '{trigger_name}' already exists as a user-created "
             "webhook subscription; rename the trigger to avoid clobbering it"
         )
+    # Hermes lanes parse deliver as a bare platform NAME; the chat rides in
+    # deliver_extra.chat_id. "telegram:12345" would fail the Platform() lookup
+    # at send time ("Unknown deliver type") and every fire dies post-response.
+    deliver_type, _, deliver_chat = deliver.partition(":")
     route: Dict[str, Any] = {
         "description": description or f"galvanize trigger: {trigger_name}",
         # None -> default; [] -> explicitly ALLOW ALL (external services
@@ -151,9 +155,11 @@ def register_route(
         "events": list(events) if events is not None else ["galvanize"],
         "secret": secret,
         "prompt": prompt or "{prompt}",
-        "deliver": deliver,
+        "deliver": deliver_type or "log",
         "managed_by": MANAGED_BY,
     }
+    if deliver_chat:
+        route["deliver_extra"] = {"chat_id": deliver_chat}
     if existing and existing.get("secret"):
         route["secret"] = existing["secret"]  # keep stable secret across re-adds
     elif existing is None and not secret:
