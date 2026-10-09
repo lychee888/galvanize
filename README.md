@@ -4,6 +4,18 @@
 
 galvanize watches the real world (new mail, a file landing in a folder, a git commit, a webhook call, an event from a script) and starts a fresh AI agent session with a prompt you wrote the moment one occurs. Event triggers sit directly in the agent's own tool list (native plugin for Hermes, MCP server for Claude Code and Codex), so "wake me when resumes land" wires an actual push trigger. Passwords go to your OS keyring, each trigger starts watching in seconds, and results arrive wherever you asked (Telegram, Discord, or the log).
 
+### What your harness doesn't already do
+
+- **Claude Code and Codex can't be woken from outside at all.** Their hooks run
+  inside a live session. galvanize supplies the missing inbound door: the daemon
+  watches the world and spawns the session when something happens.
+- **Hermes has inbound webhooks, but only as admin config**, never in the
+  agent's tool list. So agents fall back to cron: an hourly poller that spends
+  an LLM run to announce that nothing arrived.
+- **Watching is free; thinking costs tokens.** Source state (IMAP IDLE, folder,
+  relay) lives in a small daemon with reconnect, dedupe, and catch-up. A model
+  runs exactly once per real event, in a fresh one-shot session you scoped.
+
 ## Install
 
 Works on Windows, macOS, and Linux (Python 3.10+). No cloning needed; one command installs straight from GitHub:
@@ -34,7 +46,7 @@ galvanize test cad-drops   # inject a synthetic event through the real path
 
 ## Why
 
-Cron polling is usually the only event surface an agent can see, so "trigger me when X" becomes an hourly poller. galvanize puts event triggers *in the agent's own tool list*, so the agent wires a real push trigger.
+Polling is what agents reach for because it's the only event surface in their tool list; everything above makes the push version the default.
 
 - **Fresh sessions.** Each event spawns a clean one-shot run; results are delivered where you asked.
 - **Management everywhere cron is managed.** Dashboard `/triggers` tab, `/triggers` slash command, `hermes triggers` CLI, agent tools, plus `galvanize status` / `doctor` / `daemon`: all surfaces, one ops core.
