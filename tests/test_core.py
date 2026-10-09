@@ -1,5 +1,7 @@
 import json
+import os
 import time
+from datetime import date
 
 import pytest
 
@@ -169,3 +171,37 @@ def test_wake_preset_codex_adds_successfully(isolated_homes):
     from galvanize.config import load_triggers
     t = load_triggers()["preset-cx"]
     assert t.wake["kind"] == "shell" and "codex exec" in t.wake["command"]
+
+
+# ---------------------------------------------------- daemon liveness / status
+
+def test_live_daemon_pid_respects_heartbeat_age(isolated_homes):
+    from galvanize import state as st
+    assert st.live_daemon_pid() is None            # no heartbeat at all
+    st.set_heartbeat()
+    assert st.live_daemon_pid() == os.getpid()     # fresh beat -> this pid
+    p = isolated_homes["galvanize"] / "state.json"
+    data = json.loads(p.read_text())
+    data["_daemon"]["heartbeat"] -= 120            # force stale
+    p.write_text(json.dumps(data))
+    assert st.live_daemon_pid() is None
+
+
+def test_daemon_run_refuses_second_instance(isolated_homes, monkeypatch, capsys):
+    from galvanize import state as st
+    from galvanize.daemon import Daemon
+    st.set_heartbeat()                             # marks THIS pid alive…
+    st._save({**st._load(), "_daemon": {"heartbeat": __import__("time").time(), "pid": 999999}})
+    Daemon().run()                                 # …so run() must refuse, not double-watch
+    assert "already running" in capsys.readouterr().out
+
+
+def test_status_fires_today_requires_matching_date(isolated_homes, hermes_cfg):
+    from galvanize import manage
+    from galvanize.state import state_path
+    yesterday = (date.today() - __import__("datetime").timedelta(days=1)).isoformat()
+    state_path().write_text(json.dumps({
+        "t1": {"fires_date": yesterday, "fires_today": 4, "last_fire": None}}))
+    upsert_trigger(Trigger(name="t1", source={"type": "emit"}, wake={"kind": "log"}))
+    row = next(r for r in manage.status()["triggers"] if r["name"] == "t1")
+    assert row["fires_today"] == 0                 # stale count must not render as today's
