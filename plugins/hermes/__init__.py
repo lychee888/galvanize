@@ -204,7 +204,10 @@ def _slash_triggers(raw_args: str) -> str:
     try:
         from galvanize import manage
     except ImportError:
-        return "galvanize is not installed in this interpreter."
+        import sys
+        return ("galvanize is not importable in this interpreter. "
+                f"Fix: {sys.executable} -m pip install galvanize "
+                "(or run: galvanize init)")
     if verb == "test" and len(parts) > 1:
         r = manage.test_trigger(parts[1])
         return ("✔ " + r.get("detail", "accepted")) if r.get("ok") else ("✖ " + r.get("error", "failed"))
@@ -215,7 +218,8 @@ def _slash_triggers(raw_args: str) -> str:
     if not s["triggers"]:
         lines.append("No triggers yet — describe the event you want watched.")
     for row in s["triggers"]:
-        mark = "●" if row["watching"] else ("○" if row["enabled"] else "–")
+        mark = ("●" if row["watching"] else "○" if row["enabled"] is False
+                else "⇢" if row.get("manual") else "–")
         err = f"  ERR: {str(row['last_error'])[:40]}" if row["last_error"] else ""
         lines.append(f"{mark} {row['name']}  {row['source']}→{row['wake']}  "
                      f"last: {row['last_fire']}  today: {row['fires_today']}{err}")
@@ -233,8 +237,38 @@ def _cli_setup_triggers(subparser) -> None:
 
 
 def _cli_handle_triggers(args) -> None:
-    """`hermes triggers ...` — thin wrapper over manage ops."""
-    from galvanize import manage
+    """`hermes triggers ...` — thin wrapper over manage ops.
+
+    Falls back to the `galvanize` CLI shim when the package isn't importable
+    in THIS interpreter: the hermes launcher runs the CLI with `-I -S`, which
+    drops site-packages from sys.path, so the verb would otherwise die even
+    on a perfectly installed machine.
+    """
+    try:
+        from galvanize import manage
+    except ImportError:
+        import shutil
+        import subprocess
+        import sys
+        verb0 = getattr(args, "verb", "status")
+        shim = shutil.which("galvanize") or shutil.which("galvanize.exe")
+        if not shim:
+            print("galvanize not importable in this interpreter and the "
+                  "'galvanize' CLI is not on PATH.\n"
+                  f"  Fix: {sys.executable} -m pip install galvanize   "
+                  "(or run: galvanize init)")
+            raise SystemExit(1)
+        argv = [shim, "doctor" if verb0 == "doctor" else "status"]
+        if verb0 == "test":
+            argv = [shim, "test", getattr(args, "name", "") or ""]
+        try:
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=60,
+                               encoding="utf-8", errors="replace")
+        except Exception as e:
+            print(f"galvanize CLI fallback failed: {e}")
+            raise SystemExit(1)
+        print((p.stdout or p.stderr).rstrip())
+        raise SystemExit(p.returncode)
     verb = getattr(args, "verb", "status")
     if verb == "test":
         r = manage.test_trigger(getattr(args, "name", "") or "")
@@ -251,7 +285,8 @@ def _cli_handle_triggers(args) -> None:
     if not s["triggers"]:
         print("No triggers yet — ask the agent to create one, or: galvanize add folder <path>")
     for row in s["triggers"]:
-        print(f"{'●' if row['watching'] else '–'} {row['name']:<24} "
+        mark = ("●" if row["watching"] else "⇢" if row.get("manual") else "–")
+        print(f"{mark} {row['name']:<24} "
               f"{row['source']:>8} → {row['wake']:<6} last: {row['last_fire']}  "
               f"today: {row['fires_today']}")
     for n in s["notes"]:

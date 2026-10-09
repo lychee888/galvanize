@@ -20,7 +20,8 @@ import sys
 from typing import Any, Dict, Optional
 
 PROTOCOL = "2024-11-05"
-SERVER = {"name": "galvanize", "version": "0.2.0"}
+from . import __version__ as _V
+SERVER = {"name": "galvanize", "version": _V}
 
 _STEER = ("USE THESE INSTEAD OF a scheduled/polling job whenever the user "
           "describes an EVENT ('when X lands/arrives/happens'). ")

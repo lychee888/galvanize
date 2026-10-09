@@ -157,12 +157,57 @@ def _plugin_source_dir() -> Path | None:
     return None
 
 
-def _hermes_interpreter() -> "Path | None":
-    """Interpreter backing the `hermes` command (its venv's python), or None.
+def _proc_exe(pid: int) -> "Path | None":
+    """Executable path of a live pid (platform-specific), or None."""
+    try:
+        import sys as _sys
+        if _sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            k32 = ctypes.windll.kernel32
+            k32.OpenProcess.restype = wintypes.HANDLE  # avoid c_int truncation of 64-bit handles
+            h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not h:
+                return None
+            try:
+                buf = ctypes.create_unicode_buffer(32768)
+                size = wintypes.DWORD(len(buf))
+                if not k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                    return None
+                exe = Path(buf.value)
+            finally:
+                k32.CloseHandle(h)
+        else:
+            exe = Path(f"/proc/{pid}/exe").resolve(strict=True)
+        return exe if exe.exists() else None
+    except Exception:
+        return None
 
-    The plugin's in-process path needs `import galvanize` to succeed in the
-    SAME interpreter the gateway runs in — so `init` pip-installs us there.
+
+def _gateway_interpreter() -> "Path | None":
+    """Interpreter of the LIVE Hermes gateway process, or None.
+
+    Reads $HERMES_HOME/gateway_state.json for the gateway pid, then asks the
+    OS that process's real executable. This is the only trustworthy answer:
+    a desktop-installed Hermes runs the gateway from the managed tool
+    interpreter (hermes/tools/python-*/python.exe), NOT the git-install venv
+    a `hermes` shim on PATH would point at.
     """
+    import json as _json
+    try:
+        from .paths import hermes_home
+        gs = hermes_home() / "gateway_state.json"
+        pid = int(_json.loads(gs.read_text(encoding="utf-8")).get("pid") or 0)
+    except Exception:
+        return None
+    if pid <= 0:
+        return None
+    return _proc_exe(pid)
+
+
+def _path_interpreter() -> "Path | None":
+    """Interpreter behind the `hermes` command on PATH (classic venv install)."""
     import shutil as _sh
 
     exe = _sh.which("hermes") or _sh.which("hermes.exe")
@@ -174,6 +219,32 @@ def _hermes_interpreter() -> "Path | None":
         if cand.exists():
             return cand
     return None
+
+
+def _hermes_interpreters() -> "list[Path]":
+    """Every Hermes interpreter the plugin might run inside, deduped, best first.
+
+    The plugin's in-process path needs `import galvanize` to succeed in the
+    SAME interpreter the gateway runs in, and on desktop installs that is the
+    managed tool interpreter, not the PATH one — so `init` must cover both.
+    """
+    out: "list[Path]" = []
+    for cand in (_gateway_interpreter(), _path_interpreter()):
+        if cand is None:
+            continue
+        try:
+            key = cand.resolve()
+        except Exception:
+            key = cand
+        if key not in [Path(o).resolve() if o.exists() else o for o in out]:
+            out.append(cand)
+    return out
+
+
+# Back-compat for anything importing the old singular name.
+def _hermes_interpreter() -> "Path | None":
+    interps = _hermes_interpreters()
+    return interps[0] if interps else None
 
 
 def _install_spec_for_pip() -> str:
@@ -198,51 +269,47 @@ def _install_spec_for_pip() -> str:
 
 
 def _ensure_galvanize_in_hermes_venv(quiet: bool = False) -> None:
-    """pip-install galvanize into the Hermes interpreter so the plugin's
-    in-process path works (pipx/uvx/standalone installs are invisible to it)."""
+    """pip-install galvanize into EVERY Hermes interpreter the plugin can run
+    inside (the live gateway's own + the PATH one), so the plugin's in-process
+    path works (pipx/uvx/standalone installs are invisible to it)."""
     import subprocess
 
-    interp = _hermes_interpreter()
-    if interp is None:
-        return  # hermes not on PATH — nothing to do
-    try:
-        probe = subprocess.run(
-            [str(interp), "-c", "import galvanize"],
-            capture_output=True, text=True, timeout=30)
-        if probe.returncode == 0:
-            if not quiet:
-                _print_lines(["✔ galvanize already importable in the Hermes interpreter."])
-            return
-    except Exception:
-        return
-    # Not importable there -> install from the SAME source this copy came
-    # from. dev checkout -> editable path; pipx/git+https install -> the
-    # recorded git URL (PyPI may not have us yet); PyPI wheel -> version pin.
+    interps = _hermes_interpreters()
+    if not interps:
+        return  # no Hermes install discoverable — nothing to do
     src = Path(__file__).resolve().parents[1]
     dev_checkout = (src / "pyproject.toml").exists() and (src / "galvanize" / "__init__.py").exists()
-    cmd = [str(interp), "-m", "pip", "install", "--quiet", "--disable-pip-version-check"]
-    target_display = ""
-    if dev_checkout:
-        cmd += ["-e", str(src)]
-        target_display = f"-e {src}"
-    else:
-        install_spec = _install_spec_for_pip()
-        cmd.append(install_spec)
-        target_display = install_spec
-    if not quiet:
-        _print_lines(["Installing galvanize into the Hermes interpreter (plugin needs it)..."])
-    try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if p.returncode == 0:
-            _print_lines(["✔ galvanize installed into the Hermes interpreter — plugin runs in-process."])
-        else:
-            last = ((p.stderr or p.stdout).strip().splitlines() or ["?"])[-1][:160]
-            _print_lines([f"⚠ pip install into {interp} failed:",
-                          "  " + last,
-                          f"  Fix manually:  {interp} -m pip install {target_display}"])
-    except Exception as e:
-        _print_lines([f"⚠ could not run pip: {e}",
-                      f"  Fix manually:  {interp} -m pip install {target_display}"])
+    spec = str(src) if dev_checkout else _install_spec_for_pip()
+    for interp in interps:
+        try:
+            probe = subprocess.run(
+                [str(interp), "-c", "import galvanize"],
+                capture_output=True, text=True, timeout=30)
+            if probe.returncode == 0:
+                if not quiet:
+                    _print_lines([f"✔ galvanize importable in Hermes interpreter {interp}."])
+                continue
+        except Exception:
+            continue
+        # Not importable there -> install from the SAME source this copy came
+        # from. dev checkout -> editable path; pipx/git+https install -> the
+        # recorded git URL (PyPI may not have us yet); PyPI wheel -> version pin.
+        cmd = [str(interp), "-m", "pip", "install", "--quiet", "--disable-pip-version-check"]
+        cmd += (["-e", spec] if dev_checkout else [spec])
+        if not quiet:
+            _print_lines([f"Installing galvanize into {interp} (plugin needs it there)..."])
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if p.returncode == 0:
+                _print_lines([f"✔ galvanize installed into {interp} — plugin runs in-process."])
+            else:
+                last = ((p.stderr or p.stdout).strip().splitlines() or ["?"])[-1][:160]
+                _print_lines([f"⚠ pip install into {interp} failed:",
+                              "  " + last,
+                              f"  Fix manually:  {interp} -m pip install {spec}"])
+        except Exception as e:
+            _print_lines([f"⚠ could not run pip for {interp}: {e}",
+                          f"  Fix manually:  {interp} -m pip install {spec}"])
 
 
 def _install_plugin(quiet: bool = False) -> bool:
@@ -395,7 +462,8 @@ def cmd_status(args) -> int:
         return 0
     print()
     for row in s["triggers"]:
-        mark = "✔" if row["watching"] else "⏸" if row["enabled"] is False else "✖"
+        mark = ("✔" if row["watching"] else "⏸" if row["enabled"] is False
+                else "⏭" if row.get("manual") else "✖")
         err = f"  last error: {row['last_error'][:60]}" if row["last_error"] else ""
         print(f"  {mark} {row['name']:<24} {row['source']:>7} → {row['wake']:<6} "
               f"last fire: {row['last_fire']:>9}  today: {row['fires_today']}{err}")

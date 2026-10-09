@@ -403,6 +403,10 @@ def status() -> Dict[str, Any]:
                             if st.get("fires_date") == date.today().isoformat() else 0),
             "last_error": st.get("last_error"),
         }
+        if t.source_type == "emit":
+            # Not a watcher by design: woken externally via `galvanize emit`.
+            # Renderers should show a distinct 'manual' mark, not an error.
+            row["manual"] = True
         if t.source_type == "folder":
             row["path"] = t.source.get("path")
         if t.source_type == "imap":
