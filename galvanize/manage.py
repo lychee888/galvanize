@@ -8,7 +8,7 @@ callers can render (CLI) or json.dumps (plugin tool handler).
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -396,7 +396,11 @@ def status() -> Dict[str, Any]:
             "watching": bool(t.enabled and watching),
             "watcher_error": health.get('error') if health else None,
             "last_fire": _fmt_age(st.get("last_fire")),
-            "fires_today": int(st.get("fires_today", 0) or 0),
+            # fires_today only resets on the NEXT fire (record_fire), so a
+            # trigger quiet for days used to report yesterday's count as
+            # today's. Trust the stored date, not the counter.
+            "fires_today": (int(st.get("fires_today", 0) or 0)
+                            if st.get("fires_date") == date.today().isoformat() else 0),
             "last_error": st.get("last_error"),
         }
         if t.source_type == "folder":

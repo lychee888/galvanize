@@ -79,6 +79,19 @@ def get_heartbeat() -> Optional[dict]:
     return _load().get("_daemon")
 
 
+def live_daemon_pid(max_age_s: float = 60.0) -> Optional[int]:
+    """PID of the daemon whose heartbeat is still fresh, else None."""
+    hb = _load().get("_daemon")
+    if not hb:
+        return None
+    try:
+        if time.time() - float(hb.get("heartbeat", 0)) > max_age_s:
+            return None
+        return int(hb.get("pid") or 0) or None
+    except (TypeError, ValueError):
+        return None
+
+
 def get(trigger_name: str) -> Dict[str, Any]:
     return _load().get(trigger_name, {})
 

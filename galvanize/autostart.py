@@ -75,11 +75,27 @@ def _win_install() -> tuple[bool, list[str]]:
     try:
         _write_startup_shortcut()
         lines = ["✔ Daemon will start at login (Startup shortcut created)."]
-        # start it right now, detached, windowless
-        creationflags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | NEW_PROCESS_GROUP
-        subprocess.Popen(_win_startup_cmd(), stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
-                         creationflags=creationflags)
+        from . import state as _state
+        if _state.live_daemon_pid():
+            lines.append(f"✔ Daemon already running (pid {_state.live_daemon_pid()}) — not starting a second.")
+            return True, lines
+        # start it right now, detached, windowless. BREAKAWAY_FROM_JOB matters:
+        # without it a daemon spawned from a harness session inherits that
+        # session's kill-on-close Job Object and dies with the session
+        # (observed: repeated "the daemon died" reports, no 'daemon stopped'
+        # log line = hard-killed, never the SIGTERM path).
+        creationflags = 0x00000008 | 0x00000200 | 0x01000000  # DETACHED | NEW_GROUP | BREAKAWAY
+        kwargs = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                      stdin=subprocess.DEVNULL)
+        try:
+            subprocess.Popen(_win_startup_cmd(), creationflags=creationflags, **kwargs)
+        except OSError:
+            # Parent job forbids breakaway (Job_OBJECT_MSG / nested jobs):
+            # still start, just session-tied, and say so.
+            subprocess.Popen(_win_startup_cmd(),
+                             creationflags=creationflags & ~0x01000000, **kwargs)
+            lines.append("  ⚠ started inside this session's process job (will not outlive it);"
+                         " log back in or run the Startup shortcut for a detached daemon.")
         lines.append("✔ Daemon started now.")
         return True, lines
     except Exception as e:

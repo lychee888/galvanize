@@ -12,6 +12,7 @@ that is the point of the architecture.
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import threading
 import time
@@ -160,6 +161,17 @@ class Daemon:
     def run(self, verbose: bool = False) -> None:
         _setup_logging(verbose)
         ensure_home()
+        # Single instance: a second daemon double-watches every mailbox (both
+        # connect, both race to advance the UID anchor, one may miss events)
+        # and desyncs heartbeat pid from watcher health pids, which makes
+        # `status` lie about staleness. Refuse to join an alive daemon.
+        live = state.live_daemon_pid()
+        if live and live != os.getpid():
+            logger.error("daemon: another instance is alive (pid %d, heartbeat fresh) "
+                         "— refusing to start a second; stop it first: galvanize daemon stop",
+                         live)
+            print(f"  ✖ galvanize daemon already running (pid {live}).")
+            return
         pid_path().write_text(str(__import__("os").getpid()), encoding="utf-8")
         # serve = versioned external API (dsh plugin, mcp clients). Embedded
         # on a daemon thread so at-login autostart keeps it alive with zero
