@@ -31,6 +31,20 @@ DEFAULT_PORT = 8644
 _SUBS_FILENAME = "webhook_subscriptions.json"
 MANAGED_BY = "galvanize"
 
+# Wake-session tool grants. The gateway restricts webhook lanes to the
+# `hermes-webhook` composite (web_search, web_extract, vision_analyze,
+# clarify) unless a route carries a "toolsets" key (gateway/platforms/
+# webhook.py toolsets_for_source — consumed gateway/run_turn.py
+# _resolve_enabled_toolsets_for_source). PARITY_TOOLSETS is the gateway's
+# `default` distribution ("all available tools, all the time",
+# toolset_distributions.py; every member sits at 100%, so it resolves to
+# exactly these names) — i.e. what a cron/main Hermes session gets. The
+# gateway re-validates each name through resolve_toolset at spawn time and
+# drops unknown ones, so an outdated entry here degrades to a no-op, never
+# a hard failure.
+PARITY_TOOLSETS: Tuple[str, ...] = ("browser", "file", "image_gen",
+                                    "terminal", "vision", "web")
+
 
 class HermesNotConfigured(Exception):
     """Webhook platform is not enabled in the user's Hermes config."""
@@ -127,6 +141,7 @@ def register_route(
     description: str = "",
     events: Optional[list] = None,
     prompt: str = "{prompt}",
+    toolsets: Optional[list] = None,
 ) -> str:
     """Create/refresh our managed route. Returns the webhook URL.
 
@@ -135,6 +150,12 @@ def register_route(
     serves every wake kind. webhook-kind triggers pass the user's own
     template instead: those events arrive straight from the external
     service, and the Hermes lane renders the template itself.
+
+    `toolsets` (v0.2.4) decides the wake session's tool access, written as
+    the route's per-route "toolsets" key the gateway consumes at spawn:
+      None  -> keep an existing non-empty override, else PARITY_TOOLSETS
+      []    -> explicit restricted (alert-only): no key written
+      [...] -> grant exactly those toolset names (gateway drops unknowns)
     """
     subs = _load_subs()
     existing = subs.get(trigger_name)
@@ -160,6 +181,15 @@ def register_route(
     }
     if deliver_chat:
         route["deliver_extra"] = {"chat_id": deliver_chat}
+    if toolsets is not None:
+        grant = [str(t).strip() for t in toolsets if str(t).strip()]
+    else:
+        prev = existing.get("toolsets") if isinstance(existing, dict) else None
+        grant = ([str(t).strip() for t in prev if str(t).strip()]
+                 if isinstance(prev, list) and prev
+                 else list(PARITY_TOOLSETS))
+    if grant:  # [] (explicit restricted) writes no key -> gateway default
+        route["toolsets"] = grant
     if existing and existing.get("secret"):
         route["secret"] = existing["secret"]  # keep stable secret across re-adds
     elif existing is None and not secret:
@@ -174,6 +204,34 @@ def route_secret(trigger_name: str) -> Optional[str]:
     if route and route.get("managed_by") == MANAGED_BY:
         return route.get("secret") or None
     return None
+
+
+def route_toolsets(trigger_name: str) -> Optional[list]:
+    """The toolsets override granted to OUR route, None when the key is
+    absent (restricted default — explicit or pre-v0.2.4 legacy) or the
+    route is not galvanize-managed."""
+    route = _load_subs().get(trigger_name)
+    if route and route.get("managed_by") == MANAGED_BY:
+        ts = route.get("toolsets")
+        if isinstance(ts, list):
+            cleaned = [str(t).strip() for t in ts if str(t).strip()]
+            return cleaned or None
+    return None
+
+
+def set_route_toolsets(trigger_name: str, grant: Optional[list]) -> bool:
+    """Replace (empty grant -> drop) the toolsets key on a managed route,
+    touching no other field. Migration-safe: never rebuilds a route dict."""
+    subs = _load_subs()
+    route = subs.get(trigger_name)
+    if not route or route.get("managed_by") != MANAGED_BY:
+        return False
+    if grant:
+        route["toolsets"] = [str(t).strip() for t in grant if str(t).strip()]
+    else:
+        route.pop("toolsets", None)
+    _save_subs(subs)
+    return True
 
 
 def unregister_route(trigger_name: str) -> bool:

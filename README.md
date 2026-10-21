@@ -135,6 +135,72 @@ or fetching mail, then re-enters IDLE after draining.
 
 The agent's own `trigger_add` tool is the primary creation path; the CLI is the fallback for use without an agent. Both write the same `~/.galvanize/triggers.yaml`, and the dashboard tab manages what either creates.
 
+### Wake sessions & tool access
+
+A galvanize wake is an event-based cron session: the woken Hermes session
+runs with the toolsets named by its webhook **route**. Since v0.2.4 every
+managed route carries an explicit `toolsets` key defaulting to main-session
+parity: the gateway's `default` distribution ("all available tools, all the
+time"), i.e. `browser, file, image_gen, terminal, vision, web`. Without the
+key the gateway falls back to the restricted `hermes-webhook` composite
+(web_search, web_extract, vision_analyze, clarify), which silently cripples
+any prompt containing real steps.
+
+Narrow the grant per trigger (CLI; the plugin/MCP `trigger_add` tool takes
+the same list as `wake_tools`):
+
+```bash
+galvanize add folder ~/inbox --wake-tools terminal,file   # exactly these
+galvanize add imap me@x.com --wake-tools none             # alert-only posture
+```
+
+`--wake-tools none` is the security knob for high-volume or untrusted feeds:
+inbound content is attacker-influable, and a wake session with autonomous
+shell access turns a prompt injection into code execution. Choose it when the
+trigger only needs to notify. The explicit choice is recorded on the trigger,
+so re-adding or updating it never silently widens or revokes the grant.
+
+Valid names are the Hermes toolset registry keys (checked against the
+gateway's allow-list for the webhook platform as of this release):
+`bot_room, browser, catalog, clarify, code_execution, coding, computer_use,
+connections, context_engine, cronjob, debugging, delegation, desktop_ui,
+feishu_doc, feishu_drive, file, image_gen, kanban, memory, onboarding,
+project, safe, search, session_search, skills, terminal, todo, tts, video,
+video_gen, vision, web, x_search, yuanbao` (plus composites like
+`hermes-webhook`). The gateway re-validates names at spawn and drops unknown
+ones, so a stale entry degrades to a no-op.
+
+`galvanize doctor` prints one `wake tools '<name>'` row per hermes trigger
+(parity / override list / restricted) and ⚠-warns on key-less routes left by
+pre-0.2.4 installs. Fix them (recorded choices and manual grants survive):
+
+```bash
+galvanize doctor --fix    # also runs automatically on `galvanize daemon install`
+```
+
+### Importing mailbox passwords from himalaya
+
+If your mail already works via [himalaya](https://pimalaya.org/), don't type the
+app-password a second time:
+
+```bash
+galvanize secrets import-himalaya --dry-run   # list candidates; writes nothing
+galvanize secrets import-himalaya             # store plaintext IMAP passwords in your OS keyring
+galvanize secrets import-himalaya --overwrite # replace galvanize secrets that differ
+```
+
+Passwords land under the same `imap:<user>` keys `galvanize add imap` writes, so
+existing imap triggers pick the values up on their next reconnect. The himalaya
+config is read, never written, and password values are never printed. Accounts
+whose password comes from a `cmd` store are reported but skipped. The config is
+auto-detected (`~/.config/himalaya/config.toml`, `%APPDATA%\himalaya`, `$XDG_CONFIG_HOME`);
+`--config PATH` overrides, and an empty `GALVANIZE_HIMALAYA_CONFIG` disables
+discovery entirely.
+
+`galvanize doctor` adds a drift check for each himalaya account: a password that
+is missing from (or differs from) the galvanize store surfaces as a ⚠ warning
+with the exact import command to run — non-blocking, and never auto-resynced.
+
 ## Development
 
 ```bash

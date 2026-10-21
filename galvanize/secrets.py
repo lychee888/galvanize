@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -27,7 +28,37 @@ def _fallback_path() -> Path:
     return galvanize_home() / _FALLBACK_NAME
 
 
+# F2 (audit 2026-10-20): the probe used to run on EVERY call with one shared
+# "__probe__" credential; concurrent watchers' set/get/delete interleavings
+# made a loser's delete raise PasswordNotFound -> probe False -> file fallback
+# -> get_secret None -> silent empty-password logins (20-55/80 misses measured
+# with 4 threads against Windows Credential Manager). Fix: probe at most once
+# per process (memoized under a lock), key it per-pid so sibling processes
+# can't collide, and treat a failed delete as harmless cleanup noise.
+_PROBE_KEY = f"__probe__{os.getpid()}"
+_probe_ok: Optional[bool] = None
+_probe_lock = threading.Lock()
+
+
+def _reset_probe_cache() -> None:
+    """Drop the memo so the next call re-probes (tests; daemons pick up a
+    newly-appeared keyring via restart)."""
+    global _probe_ok
+    with _probe_lock:
+        _probe_ok = None
+
+
 def _keyring_backend_ok() -> bool:
+    global _probe_ok
+    if _probe_ok is not None:
+        return _probe_ok
+    with _probe_lock:
+        if _probe_ok is None:
+            _probe_ok = _probe_keyring_once()
+        return _probe_ok
+
+
+def _probe_keyring_once() -> bool:
     try:
         import keyring
         from keyring.errors import NoKeyringError
@@ -38,9 +69,12 @@ def _keyring_backend_ok() -> bool:
             if "fail" in name.lower() or "null" in name.lower():
                 return False
             # A trivial write/read proves usability on Windows Credential Manager
-            keyring.set_password(SERVICE, "__probe__", "1")
-            ok = keyring.get_password(SERVICE, "__probe__") == "1"
-            keyring.delete_password(SERVICE, "__probe__")
+            keyring.set_password(SERVICE, _PROBE_KEY, "1")
+            ok = keyring.get_password(SERVICE, _PROBE_KEY) == "1"
+            try:
+                keyring.delete_password(SERVICE, _PROBE_KEY)
+            except Exception:
+                pass  # delete is cleanup; its failure never invalidates the ok read
             return ok
         except (NoKeyringError, Exception):
             return False

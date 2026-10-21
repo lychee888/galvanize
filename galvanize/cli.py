@@ -353,6 +353,15 @@ def _add_plugin_to_enabled(name: str) -> None:
 
 # ------------------------------------------------------------------ add
 
+def _parse_wake_tools(raw: str):
+    """--wake-tools 'terminal,file' -> ['terminal','file']; 'none' -> []
+    (explicit restricted); unset/blank -> None (parity default)."""
+    toks = [x.strip() for x in (raw or "").split(",") if x.strip()]
+    if not toks:
+        return None
+    return [] if toks == ["none"] else toks
+
+
 def cmd_add(args) -> int:
     patterns = [p.strip() for p in args.patterns.split(",")] if args.patterns else None
     events = [e.strip() for e in args.events.split(",")] if args.events else None
@@ -373,6 +382,7 @@ def cmd_add(args) -> int:
         cooldown_s=args.cooldown,
         workdir=args.workdir or "",
         wake_profile=getattr(args, "wake_profile", "") or "",
+        wake_tools=_parse_wake_tools(getattr(args, "wake_tools", "")),
         imap_host=getattr(args, "host", "") or "",
         folder=getattr(args, "folder", "") or "",
         password=password,
@@ -494,6 +504,13 @@ def cmd_daemon(args) -> int:
     verb = args.verb
     if verb == "install":
         ok, lines = autostart.install()
+        if ok:
+            # v0.2.4 migration hook: routes touched by this install get the
+            # parity toolsets key (recorded choices and manual grants kept).
+            for c in manage.refresh_route_grants()["changed"]:
+                now = ("restricted (alert-only)" if not c["now"]
+                       else ", ".join(c["now"]))
+                lines.append(f"wake tools '{c['name']}' → {now}")
     elif verb == "remove":
         ok, lines = autostart.remove()
     elif verb == "stop":
@@ -568,13 +585,58 @@ def cmd_mcp(args) -> int:
 
 
 def cmd_doctor(args) -> int:
+    if getattr(args, "fix", False):
+        m = manage.refresh_route_grants()
+        for c in m["changed"]:
+            now = ("restricted (alert-only)" if not c["now"]
+                   else ", ".join(c["now"]))
+            print(f"  ↻ wake tools '{c['name']}' → {now}")
+        if not m["changed"]:
+            print("  route toolsets already current")
+        print()
     r = manage.doctor()
+    warns = 0
     for c in r["checks"]:
-        mark = "✔" if c["ok"] else "✖"
+        if c.get("warn") and c["ok"]:
+            mark, warns = "⚠", warns + 1
+        else:
+            mark = "✔" if c["ok"] else "✖"
         print(f"  {mark} {c['name']:<28} {c['note']}")
     print()
-    print("  " + ("All checks passed." if r["ok"] else "Some checks need attention (✖)."))
+    if not r["ok"]:
+        print("  Some checks need attention (✖).")
+    elif warns:
+        print(f"  No failures; {warns} warning(s) (⚠) — non-blocking.")
+    else:
+        print("  All checks passed.")
     return 0 if r["ok"] else 1
+
+
+def cmd_secrets(args) -> int:
+    print("  usage: galvanize secrets import-himalaya [--dry-run] [--overwrite] [--config PATH]")
+    return 2
+
+
+def cmd_secrets_import_himalaya(args) -> int:
+    from . import himalaya
+    r = himalaya.import_himalaya(dry_run=args.dry_run,
+                                 overwrite=args.overwrite,
+                                 config=args.config)
+    if not r["ok"]:
+        print(f"  ✖ {r['error']}")
+        return 1
+    print(f"  himalaya config: {r['config']}")
+    print(f"  secret backend:  {r['backend']}"
+          + ("   (dry run — nothing written)" if r["dry_run"] else ""))
+    if not r["lines"]:
+        print("  no imap-capable accounts found")
+    for ln in r["lines"]:
+        print("  " + ln)
+    n = sum(1 for i in r["items"] if i["action"] in ("imported", "overwritten"))
+    if n:
+        print(f"\n  {n} secret(s) stored — values stay in your OS keyring; "
+              "watchers pick them up on their next reconnect.")
+    return 0
 
 
 def cmd_tunnel(args) -> int:
@@ -609,6 +671,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--command", default="", help="shell wake command, e.g. 'claude -p \"{prompt}\"'")
     sp.add_argument("--workdir", default="", help="run shell command in this directory")
     sp.add_argument("--wake-profile", default="", help="DSH profile (default: shared configured profile, initially headless)")
+    sp.add_argument("--wake-tools", default="",
+                    help="wake=hermes: toolsets the woken session may use, "
+                         "comma-separated (e.g. 'terminal,file'); 'none' = "
+                         "restricted alert-only; default = main-session "
+                         "parity (web,vision,image_gen,terminal,file,browser)")
     sp.add_argument("--prompt", default="", help="what to tell the agent ({file} = filename, {path} = full path)")
     sp.add_argument("--patterns", default="", help="comma-separated globs, e.g. '*.step,*.stl'")
     sp.add_argument("--events", default="", help="webhook kind: accepted event types")
@@ -662,7 +729,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(fn=cmd_serve)
 
     sp = sub.add_parser("doctor", help="health check: surfaces, lane, daemon, paths, secrets")
+    sp.add_argument("--fix", action="store_true",
+                    help="migrate managed routes to v0.2.4 toolset semantics "
+                         "(parity default, recorded choices kept) before checking")
     sp.set_defaults(fn=cmd_doctor)
+
+    sp = sub.add_parser("secrets", help="manage the galvanize secret store (OS keyring)")
+    sp.set_defaults(fn=cmd_secrets)
+    ssub = sp.add_subparsers(dest="secrets_action")
+    imp = ssub.add_parser("import-himalaya",
+                          help="bootstrap mailbox passwords from your himalaya config "
+                               "(reads it; never writes it; never prints values)")
+    imp.add_argument("--dry-run", action="store_true",
+                     help="list what would change without writing anything")
+    imp.add_argument("--overwrite", action="store_true",
+                     help="replace existing galvanize secrets that differ from himalaya")
+    imp.add_argument("--config", default="",
+                     help="path to himalaya config.toml (default: auto-detect; "
+                          "empty GALVANIZE_HIMALAYA_CONFIG disables discovery)")
+    imp.set_defaults(fn=cmd_secrets_import_himalaya)
 
     sp = sub.add_parser("mcp", help="run the stdio MCP server (for Claude/Codex/DSH)")
     sp.set_defaults(fn=cmd_mcp)

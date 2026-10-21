@@ -92,6 +92,7 @@ class Daemon:
             watcher = ImapWatcher(
                 t, self._make_emit(name),
                 password_provider=(lambda k: (lambda: secrets_mod.get_secret(k)))(secret_key),
+                secret_key=secret_key,
             )
             watcher.start()
             self._imap_watchers[name] = (watcher, td)

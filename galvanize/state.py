@@ -122,7 +122,23 @@ def set_source_health(key: str, connected: bool, error: str = '') -> None:
 def source_health(key: str, daemon_pid=None) -> dict:
     try:
         health = json.loads(_health_path(key).read_text(encoding='utf-8'))
-        if time.time() - health['ts'] > 60 or (daemon_pid is not None and health['pid'] != daemon_pid):
+        age = time.time() - health['ts']
+        if daemon_pid is not None:
+            if health['pid'] != daemon_pid:
+                # Written by a different (dead) daemon process: not current.
+                return {'connected': False, 'error': 'stale watcher health'}
+            # F3 (audit 2026-10-20): the writer process is the LIVE daemon —
+            # its stored error is current truth even mid-backoff (a failed
+            # imap watcher only rewrites health once per retry, up to 300s).
+            # Keep the actionable error and annotate its age; do not mask it
+            # with the generic 'stale watcher health'.
+            if age > 60:
+                err = health.get('error') or (
+                    'connected' if health.get('connected')
+                    else 'watcher not connected')
+                health = dict(health, error=f"{err} ({int(age)}s ago)")
+            return health
+        if age > 60:
             return {'connected': False, 'error': 'stale watcher health'}
         return health
     except (OSError, ValueError, KeyError):

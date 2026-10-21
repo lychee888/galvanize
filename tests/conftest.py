@@ -16,6 +16,9 @@ def isolated_homes(tmp_path, monkeypatch):
     (hhome / "plugins").mkdir()
     monkeypatch.setenv("GALVANIZE_HOME", str(ghome))
     monkeypatch.setenv("HERMES_HOME", str(hhome))
+    # Determinism: never read the real user's himalaya config in tests
+    # (empty value = explicitly disabled; tests point it at a fixture).
+    monkeypatch.setenv("GALVANIZE_HIMALAYA_CONFIG", "")
     yield {"galvanize": ghome, "hermes": hhome}
 
 

@@ -83,12 +83,19 @@ def add_trigger(
     relay_url: str = "",
     relay_token: str = "",
     wake_profile: str = "",
+    wake_tools: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Create a trigger. kind: folder | webhook | emit | imap.
 
     Returns {"ok", "name", "lines": [...human summary...], "url": ...}.
     For wake=hermes this also registers the HMAC route on the Hermes lane.
     Password for imap is stored via secrets.py (OS keyring), never in YAML.
+
+    wake_tools (v0.2.4) sets the woken session's toolsets override:
+      None (default) -> main-session parity (hermes.PARITY_TOOLSETS)
+      [names...]     -> grant exactly those, recorded in the trigger's wake cfg
+      []             -> explicit restricted alert-only ("none" on the CLI)
+    Meaningless (rejected) for non-hermes wakes.
     """
     name = (name or "").strip().lower().replace(" ", "-")
     if not name and kind == "folder":
@@ -187,9 +194,21 @@ def add_trigger(
         if workdir:
             wake_cfg["workdir"] = workdir
         wake = f"shell({wake})"
+    chosen_tools: Optional[List[str]] = None
     if wake_cfg["kind"] == "hermes":
         gc = GlobalConfig.load()
         wake_cfg["deliver"] = deliver or gc.hermes_deliver or "log"
+        if wake_tools is not None:
+            wake_cfg["toolsets"] = list(wake_tools)  # record the explicit choice
+            chosen_tools = wake_cfg["toolsets"]
+        elif name in existing and isinstance(existing[name].wake.get("toolsets"), list):
+            # No-flag re-add: keep a previously RECORDED choice (esp. an
+            # explicit []/none) instead of letting route defaults drift it.
+            chosen_tools = list(existing[name].wake["toolsets"])
+    elif wake_tools is not None:
+        return {"ok": False, "error":
+                "--wake-tools only means something for wake=hermes (it sets "
+                "the route's toolsets override); drop it or use --wake hermes"}
     elif wake_cfg["kind"] == "shell":
         if command:
             wake_cfg["command"] = command   # explicit --command wins over a preset
@@ -230,6 +249,7 @@ def add_trigger(
                 name, secret, deliver=wake_cfg["deliver"],
                 description=t.description, events=route_events,
                 prompt=(t.prompt if kind == "webhook" else "{prompt}"),
+                toolsets=chosen_tools,
             )
         except ValueError as e:
             return {"ok": False, "error": str(e)}
@@ -458,8 +478,12 @@ def doctor() -> Dict[str, Any]:
     from .paths import hermes_home
 
     checks = []
-    def add(name, ok, note=""):
-        checks.append({"name": name, "ok": bool(ok), "note": note})
+    def add(name, ok, note="", warn=False):
+        # warn=True: ok stays True (never fails doctor) but surfaces as ⚠.
+        entry = {"name": name, "ok": bool(ok), "note": note}
+        if warn:
+            entry["warn"] = True
+        checks.append(entry)
 
     s = status()
     ts = load_triggers()
@@ -489,6 +513,11 @@ def doctor() -> Dict[str, Any]:
         f"api v{serve_mod.API_VERSION}" if serve_live else "not running (galvanize serve)")
     add("secrets", True, secrets_mod.migrate_note())
 
+    # himalaya drift: password present in the himalaya config but missing or
+    # different in the galvanize store -> warn (med); never auto-resync.
+    from . import himalaya as himalaya_mod
+    checks.extend(himalaya_mod.drift_checks())
+
     # folder paths still exist; hermes routes not orphaned
     for t in ts.values():
         if t.source_type == "folder":
@@ -498,7 +527,56 @@ def doctor() -> Dict[str, Any]:
                 and not hermes_mod.route_secret(t.name):
             add(f"route '{t.name}'", False,
                 "route missing — re-add: galvanize add ... --name " + t.name)
+
+    # wake-session tool grants: effective per-route toolsets state (v0.2.4)
+    for t in ts.values():
+        if t.wake_kind != "hermes" or not hermes_mod.route_secret(t.name):
+            continue  # missing/foreign route: the check above owns that signal
+        granted = hermes_mod.route_toolsets(t.name)
+        if granted and sorted(granted) == sorted(hermes_mod.PARITY_TOOLSETS):
+            add(f"wake tools '{t.name}'", True,
+                "toolsets: parity (gateway 'default' distribution)")
+        elif granted:
+            add(f"wake tools '{t.name}'", True,
+                "toolsets override: " + ", ".join(granted))
+        elif isinstance(t.wake.get("toolsets"), list):
+            add(f"wake tools '{t.name}'", True,
+                "toolsets: restricted (alert-only, explicit --wake-tools none)")
+        else:
+            add(f"wake tools '{t.name}'", True,
+                "toolsets: RESTRICTED — route registered by pre-v0.2.4 "
+                "galvanize (no key). fix: galvanize doctor --fix or re-add "
+                "this trigger", warn=True)
     return {"ok": all(c["ok"] for c in checks), "checks": checks}
+
+
+def refresh_route_grants(dry_run: bool = False) -> Dict[str, Any]:
+    """v0.2.4 migration: bring managed hermes routes to parity semantics.
+
+    Per trigger: a RECORDED wake toolsets choice always wins (including the
+    recorded [] = stay restricted); otherwise an existing non-empty route
+    override is kept as-is; a key-less route is pre-v0.2.4 legacy and gets
+    upgraded to PARITY_TOOLSETS. Only the toolsets key is touched. Hooked
+    into `galvanize daemon install` and `galvanize doctor --fix`.
+    """
+    changed: List[Dict[str, Any]] = []
+    for name, t in sorted(load_triggers().items()):
+        if t.wake_kind != "hermes":
+            continue
+        if not hermes_mod.route_secret(name):
+            continue  # missing or foreign route: not ours to fix
+        current = hermes_mod.route_toolsets(name)
+        rec = t.wake.get("toolsets")
+        if isinstance(rec, list):
+            want = [str(x).strip() for x in rec if str(x).strip()]
+        else:
+            want = list(current) if current else list(hermes_mod.PARITY_TOOLSETS)
+        if (current or []) == want:
+            continue
+        if not dry_run:
+            hermes_mod.set_route_toolsets(name, want)
+        changed.append({"name": name, "had": current, "now": want or None})
+    return {"ok": True, "changed": changed, "dry_run": dry_run}
 
 
 def _hermes_config_has_mcp(hermes_home: Path) -> bool:

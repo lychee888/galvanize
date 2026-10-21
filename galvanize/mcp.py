@@ -46,6 +46,8 @@ TOOLS = [
                 "command": {"type": "string"},
                 "workdir": {"type": "string"},
                 "wake_profile": {"type": "string", "description": "DSH profile override; otherwise use the shared configured profile."},
+                "wake_tools": {"type": "array", "items": {"type": "string"},
+                               "description": "wake=hermes only: toolsets the woken session may use. Omit for main-session parity (gateway 'default' distribution). Pass an exact subset (e.g. ['terminal','file']) or ['none'] for the restricted alert-only posture. Granting shell/file tools to an autonomous session fed by untrusted events is a USER decision - confirm before passing anything."},
                 "relay_url": {"type": "string"},
                 "relay_token": {"type": "string", "description": "Queue read credential (RELAY_TOKEN), not INGEST_TOKEN."},
             },
@@ -71,6 +73,11 @@ def _call_tool(name: str, args: Dict[str, Any]) -> str:
     if name == "trigger_add":
         if not args.get("wake"):
             return json.dumps({"ok": False, "error": "Choose an explicit wake target: hermes, claude, codex, dsh, or shell"})
+        wt = args.get("wake_tools")
+        wake_tools = None
+        if isinstance(wt, list):
+            toks = [str(x).strip() for x in wt if str(x).strip()]
+            wake_tools = [] if toks == ["none"] else toks
         target = str(args.get("target", ""))
         kind = str(args.get("kind", ""))
         r = manage.add_trigger(
@@ -88,6 +95,7 @@ def _call_tool(name: str, args: Dict[str, Any]) -> str:
             **({"pass" "word": str(args.get("app_password", ""))}),
             subject_filter=str(args.get("subject_filter", "")),
             cooldown_s=float(args.get("cooldown_s", 0) or 0),
+            wake_tools=wake_tools,
         )
         return json.dumps(r, ensure_ascii=False)
     if name == "trigger_list":

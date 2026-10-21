@@ -71,11 +71,21 @@ class _StateStore:
 _STATE = _StateStore()
 
 
+class SecretUnavailable(RuntimeError):
+    """F1 (audit 2026-10-20): a configured secret_key resolved to nothing.
+
+    Login is attempted with an empty string instead, which Gmail/Rackspace
+    answer with AUTHENTICATIONFAILED — a misleading signal. We refuse the
+    login and record the truth in the health file instead.
+    """
+
+
 class ImapWatcher:
     """One account+folder watcher thread. Emits Event per qualifying new mail."""
 
     def __init__(self, trigger, emit: Callable[[Event], None],
-                 password_provider: Optional[Callable[[], str]] = None) -> None:
+                 password_provider: Optional[Callable[[], Optional[str]]] = None,
+                 secret_key: Optional[str] = None) -> None:
         src = trigger.source
         self.name = trigger.name
         self.host = src["host"]
@@ -87,6 +97,7 @@ class ImapWatcher:
         self.patterns = list(src.get("patterns") or [])
         self._password = src.get("password", "")
         self._password_provider = password_provider
+        self._secret_key = secret_key
         self.filter_subject = str(src.get("filter_subject", ""))
         self.filter_from = str(src.get("filter_from", ""))
         self.emit = emit
@@ -105,17 +116,45 @@ class ImapWatcher:
     def stop(self) -> None:
         self._stop.set()
 
-    def _get_password(self) -> str:
+    def _get_password(self) -> Optional[str]:
+        """Resolve the credential, or None when a configured secret is missing.
+
+        None means: do NOT log in (F1). A falsy provider result with no
+        explicit password used to fall back to '' and auth with an empty
+        password — the root cause of the silent stale-watcher failure.
+        """
         if self._password_provider:
             p = self._password_provider()
             if p:
                 return p
+            if self._password:
+                return self._password
+            if self._secret_key is not None or self._password == "":
+                return None
         return self._password
 
+    def _secret_missing_error(self) -> str:
+        label = self._secret_key or f"imap:{self.user}"
+        msg = f"secret '{label}' unavailable"
+        try:
+            from .. import secrets as secrets_mod
+            backend = secrets_mod.available()
+            if backend != "keyring":
+                msg += (f" (no OS keyring backend in this process; "
+                        f"secret store: {backend})")
+        except Exception:
+            pass
+        return msg
+
     def _open(self):
+        pw = self._get_password()
+        if pw is None:
+            msg = self._secret_missing_error()
+            self.last_error = msg
+            health_state.set_source_health('imap:' + self.name, False, msg)
+            raise SecretUnavailable(msg)
         cls = MailBox if self.ssl else MailBoxUnencrypted
         box = cls(self.host, self.port)
-        pw = self._get_password()
         if self.auth == "xoauth2":
             box.xoauth2(self.user, pw)
         else:

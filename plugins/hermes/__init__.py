@@ -67,6 +67,9 @@ def _run_op(op: str, **kwargs):
                 cmd += ["--patterns", ",".join(kwargs["patterns"])]
             if kwargs.get("events"):
                 cmd += ["--events", ",".join(kwargs["events"])]
+            if kwargs.get("wake_tools") is not None:
+                cmd += ["--wake-tools",
+                        ",".join(kwargs["wake_tools"]) or "none"]
             if kwargs.get("cooldown_s"):
                 cmd += ["--cooldown", str(kwargs["cooldown_s"])]
         elif op == "remove":
@@ -96,7 +99,11 @@ ADD_SCHEMA = {
         "folder (files landing in a directory — {file} and {path} usable in prompt), "
         "webhook (external service POSTs to a URL we host: GitHub, Stripe, monitoring), "
         "emit (named event fired by scripts or other agents via `galvanize emit`). "
-        "Results deliver per-trigger (deliver='telegram'|'discord'|...|'log')."
+        "Results deliver per-trigger (deliver='telegram'|'discord'|...|'log'). "
+        "The woken session runs at main-session tool parity by default; "
+        "narrow it with wake_tools (exact subset, or ['none'] = alert-only). "
+        "GRANTING TOOLS is a USER decision — the trigger prompt reacts to "
+        "untrusted inbound content, so confirm with the user before widening."
     ),
     "parameters": {
         "type": "object",
@@ -109,6 +116,7 @@ ADD_SCHEMA = {
             "deliver": {"type": "string", "description": "delivery target for results (telegram, discord, slack, log)"},
             "events": {"type": "array", "items": {"type": "string"}, "description": "kind=webhook: event types to accept"},
             "cooldown_s": {"type": "number", "description": "minimum seconds between wakes (default 0)"},
+            "wake_tools": {"type": "array", "items": {"type": "string"}, "description": "toolsets the woken session may use; omit for parity, pass exact names or ['none'] for restricted alert-only"},
         },
         "required": ["kind", "name"],
     },
@@ -161,6 +169,11 @@ STATUS_SCHEMA = {
 # ---------------------------------------------------------------- handlers
 
 def _handle_trigger_add(args, **kw):
+    wt = args.get("wake_tools")
+    wake_tools = None
+    if isinstance(wt, list):
+        toks = [str(x).strip() for x in wt if str(x).strip()]
+        wake_tools = [] if toks == ["none"] else toks or None
     r = _run_op(
         "add",
         args.get("kind", ""),
@@ -172,6 +185,7 @@ def _handle_trigger_add(args, **kw):
         patterns=args.get("patterns") or None,
         events=args.get("events") or None,
         cooldown_s=float(args.get("cooldown_s", 0) or 0),
+        wake_tools=wake_tools,
     )
     return json.dumps(r, ensure_ascii=False)
 
