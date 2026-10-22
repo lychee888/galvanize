@@ -101,11 +101,31 @@ class TestProbeLive:
         m = runtime.probe(_win_target())
         assert m.get("schema") == 1, m
         assert m["ok"] is True
-        for cap in ("cli", "imap", "folder", "keyring", "windowless"):
+        # FIX-CI B: the keyring capability is HOST state — headless Linux
+        # runners have no backend, and the probe contract is degraded-but-
+        # launchable (auth failures are non-blocking). Assert the green
+        # guarantee where a backend exists and the DEGRADED shape where it
+        # does not; a keyring-less Windows box is a regression, never CI noise.
+        from galvanize import secrets as gsecrets
+        usable = gsecrets.keyring_status()["usable"]
+        if NT:
+            assert usable, "Windows runner must present a usable keyring backend"
+        for cap in ("cli", "imap", "folder", "windowless"):
             assert m["capabilities"].get(cap) is True, m["failures"]
+        if usable:
+            assert m["capabilities"].get("keyring") is True, m["failures"]
+            assert m["keyring"]["roundtrip"] is True
+            assert not [f for f in m["failures"] if f["kind"] == "auth"], m["failures"]
+        else:
+            assert m["capabilities"].get("keyring") is False
+            assert m["keyring"]["roundtrip"] is False
+            auth = [f for f in m["failures"]
+                    if f["check"] == "keyring-backend" and f["kind"] == "auth"]
+            assert auth, ("backend-less host must report the degradation, "
+                          f"not hide it: {m['failures']}")
+            assert m["ok"] is True, "auth-degraded stays launchable (non-blocking)"
         assert m["version"] == __version__
         assert m["isolated"] is True
-        assert m["keyring"]["roundtrip"] is True
         assert m["versions"].get("imap-tools")
 
     def test_pythonpath_injection_cannot_poison_isolated_probe(self, poison_dir):

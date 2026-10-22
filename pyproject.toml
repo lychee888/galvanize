@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "galvanize"
-version = "0.2.5"
+version = "0.2.6"
 description = "Event-driven activation points for AI agents: wake a fresh Hermes (or any CLI agent) session when something happens."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,6 +16,9 @@ dependencies = [
     "watchdog>=4.0,<7",
     "imap-tools>=1.10,<2",
     "keyring>=24,<26",
+    # himalaya bootstrap parses TOML: tomllib is 3.11+ stdlib, 3.10 needs the
+    # identical-API backport (FIX-CI A: metadata and CI matrix agree on 3.10).
+    "tomli>=2.0; python_version < '3.11'",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -33,7 +36,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "pytest-timeout>=2.4"]
 # Declared for the C4 app-owned runtime provisioning command
 # (`pip install galvanize[imap]`); the imap/keyring deps are core since
 # 0.2, so the extra is an intent marker + forward compatibility.
@@ -50,3 +53,6 @@ galvanize = "galvanize.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# FIX-CI C: a hang must name itself, not eat the job timeout (macOS 3.13
+# burned 6 h of a cancelled run with zero output under -q).
+timeout = 90

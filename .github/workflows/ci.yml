@@ -12,6 +12,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.10", "3.13"]
+    timeout-minutes: 30   # FIX-CI: never burn the 6 h default on a hang again
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

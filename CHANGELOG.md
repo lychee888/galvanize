@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.2.6 — cross-platform CI made honest (release-hygiene patch)
+
+v0.2.5's tag pushed a suite that was green on the Windows dev box and red
+across the 3.10/POSIX half of the public matrix. No runtime behavior of the
+daemon changed; what changed is that the test suite and the shipped metadata
+now tell the truth on every platform they claim.
+
+- **Python 3.10 stays supported, for real.** `galvanize.himalaya` imported
+  `tomllib` (3.11+ stdlib) at module scope, so test *collection* died on
+  every 3.10 job while `requires-python` promised 3.10. The import is now
+  `tomllib` with a `tomli` fallback, and `tomli>=2.0` ships as a marker
+  dependency (`python_version < "3.11"`). Matrix and metadata agree.
+- **Capability probe test follows the probe's own contract.** The live
+  probe test asserted a green keyring capability everywhere; headless
+  Linux runners have no keyring backend, and the probe deliberately
+  reports that as a non-blocking `auth` degradation (degraded-but-
+  launchable). The test now asserts the green guarantee when the host
+  backend is usable and the exact degraded shape when it is not.
+  A keyring-less **Windows** runner still fails loudly: the platform
+  guarantee is unchanged.
+- **Windows-semantics tests are gated, not deleted.** The schtasks
+  watchdog registration tests (short-circuit by design off NT) and the
+  supervisor liveness/kill helpers (`powershell`, `taskkill`) now branch
+  or skip on platform instead of assuming the CI box is a Windows box.
+  `winlaunch`'s shell-string test verifies env plumbing on both spellings
+  (`%VAR%` on cmd, `$VAR` on sh).
+- **A hang must name itself.** `pytest-timeout` (90 s/test) plus
+  `timeout-minutes: 30` on the CI job replace the 6-hour macOS-latest
+  cancelled-by-timeout failure mode, which produced no diagnostics at all
+  under `-q`.
+
 ## 0.2.5 — one authority, self-healing boot, housekeeping paid up
 
 ### Release train (C6): legacy-artifact retirement and a console-free watchdog

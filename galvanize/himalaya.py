@@ -14,7 +14,12 @@ keys existing imap triggers reference, or the import is useless.
 from __future__ import annotations
 
 import os
-import tomllib
+
+try:
+    import tomllib                      # 3.11+ stdlib
+except ModuleNotFoundError:             # FIX-CI A: keep the shipped 3.10 floor
+    import tomli as tomllib             # type: ignore[import-not-found] (py<3.11 only)
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple

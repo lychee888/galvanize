@@ -16,6 +16,12 @@ import pytest
 from galvanize import watchdog
 from galvanize.paths import galvanize_home, pause_flag_path, shutdown_flag_path
 
+# FIX-CI: the schtasks belt is Windows by design (register/unregister/
+# registered short-circuit off NT: systemd/launchd own that role). These
+# tests assert the NT argv surface and must not run blindly on POSIX.
+NT_ONLY = pytest.mark.skipif(os.name != "nt",
+                             reason="Windows scheduled-task belt semantics")
+
 
 # ------------------------------------------------------------------ spec
 
@@ -90,6 +96,7 @@ class _Run:
         self.returncode, self.stdout, self.stderr = rc, out, ""
 
 
+@NT_ONLY
 @pytest.mark.parametrize("rc", [0, 1])
 def test_register_reports_both_ways(monkeypatch, rc):
     calls = []
@@ -110,6 +117,7 @@ def test_register_reports_both_ways(monkeypatch, rc):
             "failure must name the weaker guarantee, never stay silent"
 
 
+@NT_ONLY
 def test_unregister_removes_task_and_vbs(monkeypatch):
     calls = []
     monkeypatch.setattr(watchdog.winlaunch, "run",
@@ -120,6 +128,7 @@ def test_unregister_removes_task_and_vbs(monkeypatch):
     assert [c[1] for c in calls] == ["/End", "/Delete"]
 
 
+@NT_ONLY
 def test_registered_uses_query_and_caches(monkeypatch):
     watchdog._QUERY_CACHE.clear()
     calls = []
@@ -239,6 +248,7 @@ def test_ensure_spawn_failure_is_failed():
 
 # ------------------------------------------------------------------ persistence surface
 
+@NT_ONLY
 def test_persistence_summary_shapes(monkeypatch):
     monkeypatch.setattr(watchdog, "registered", lambda p=None, **k: True)
     import galvanize.autostart as a
@@ -320,6 +330,7 @@ def test_base_windowless_interpreter_needs_the_exe(tmp_path, monkeypatch):
     assert not free, "a venv with no base pythonw must NOT claim console-free"
 
 
+@NT_ONLY
 def test_register_enables_a_disabled_stopgap_task(monkeypatch):
     calls = []
     monkeypatch.setattr(watchdog.winlaunch, "run",

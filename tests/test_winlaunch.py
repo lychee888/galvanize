@@ -26,7 +26,11 @@ def test_run_captures_output_and_exit_code():
 
 
 def test_run_shell_string_and_env():
-    r = winlaunch.run("echo %GZ_PROBE%", shell=True,
+    # FIX-CI: shell=True hands the string to cmd.exe on nt and /bin/sh
+    # elsewhere (winlaunch's documented contract); only the substitution
+    # syntax differs, the env plumbing assertion holds on every platform.
+    probe = "%GZ_PROBE%" if os.name == "nt" else "$GZ_PROBE"
+    r = winlaunch.run(f"echo {probe}", shell=True,
                       env={**os.environ, "GZ_PROBE": "42"})
     assert r.returncode == 0
     assert "42" in r.stdout

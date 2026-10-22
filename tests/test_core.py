@@ -195,7 +195,13 @@ def test_daemon_run_refuses_second_instance(isolated_homes, monkeypatch, capsys)
     from galvanize import state as st
     from galvanize import store
     from galvanize.daemon import Daemon
-    store.set_heartbeat(pid=4, ts=_t.time())        # "System" pid: always alive
+    # FIX-CI: pid 4 is the System process only on Windows; on POSIX WSL it
+    # can read as dead (ESRCH) and the whole test then starts a real loop.
+    # pid 1 (init/launchd/systemd) is the POSIX-universal "other live pid".
+    other = 4 if os.name == "nt" else 1
+    if os.getpid() == other:
+        pytest.skip("test process is the anchor pid here")
+    store.set_heartbeat(pid=other, ts=_t.time())    # always-alive pid: refuse
     Daemon().run()
     assert "already running" in capsys.readouterr().out
     # Dead-owner beat (pid 999999) no longer refuses (adoption path, covered

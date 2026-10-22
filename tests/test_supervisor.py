@@ -54,6 +54,20 @@ def borns(home):
 
 
 def pid_alive(pid):
+    # FIX-CI: powershell is not on POSIX runners; the assertion is pure
+    # liveness semantics, so branch on the platform instead of the OS brand.
+    if os.name != "nt":
+        try:  # reap our own zombie; a reaped/zombie pid must read dead
+            os.waitpid(pid, os.WNOHANG)
+        except OSError:
+            pass
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
     out = subprocess.run(
         ["powershell", "-NoProfile", "-Command",
          f"if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{'Y'}} else {{'N'}}"],
@@ -319,8 +333,14 @@ REPO = str(Path(FAKE).parents[1])
 
 
 def _kill_tree(pid):
-    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                   capture_output=True)
+    # FIX-CI: taskkill is the Windows tool for the Job-Object tree-kill
+    # drill; POSIX only needs the direct child to die (SIGKILL, the very
+    # scenario the heartbeat-adoption test simulates).
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                       capture_output=True)
+    else:
+        os.kill(pid, signal.SIGKILL)
 
 
 def test_worker_adopts_heartbeat_of_dead_predecessor(isolated_homes):
