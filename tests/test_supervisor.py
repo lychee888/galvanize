@@ -14,6 +14,7 @@ Acceptance map:
 import json
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import threading
@@ -391,10 +392,33 @@ def test_worker_adopts_heartbeat_of_dead_predecessor(isolated_homes):
                 err = errf.seek(0) or errf.read()[-800:]
             except OSError:
                 err = "(no stderr)"
+            frames = "(no py-spy)"
+            if shutil.which("py-spy"):
+                bases = [["py-spy"]] + ([["sudo", "-n", "py-spy"]]
+                                        if os.name != "nt" else [])
+                why_fail = ""
+                for base in bases:
+                    for extra in (["dump", "--locals"], ["dump"]):
+                        try:
+                            d = subprocess.run([*base, *extra, "-p", str(p.pid)],
+                                               capture_output=True, text=True,
+                                               timeout=30)
+                        except OSError as e:
+                            why_fail = str(e)
+                            continue
+                        if d.returncode == 0:
+                            frames = (d.stdout or "")[-1200:]
+                            break
+                        why_fail = (d.stderr or "")[-200:]
+                    if frames != "(no py-spy)":
+                        break
+                if frames == "(no py-spy)":
+                    frames = f"(attach failed: {why_fail})"
             verdict = ("worker never posted READY over a dead predecessor's "
                        f"beat; rc={p.poll()} waited={elapsed:.1f}s "
                        f"stage={'BEFORE-bind' if not (home / 'serve.json').exists() else 'bound, pre-READY'} "
                        f"home_files={sorted(q.name for q in home.iterdir())}; "
+                       f"child frames:\n{frames}\n"
                        f"child log tail:\n{why}\nchild stderr tail:\n{err}")
     finally:
         try:

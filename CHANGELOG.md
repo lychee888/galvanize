@@ -29,7 +29,12 @@ now tell the truth on every platform they claim.
 - **A hang must name itself.** `pytest-timeout` (90 s/test) plus
   `timeout-minutes: 30` on the CI job replace the 6-hour macOS-latest
   cancelled-by-timeout failure mode, which produced no diagnostics at all
-  under `-q`.
+  under `-q`. The mechanism the guard exposed: on macOS runners a freshly
+  spawned daemon child can take ~35 s to bind its first localhost
+  listener (headless network authorization; nobody to click "Allow"),
+  which the old fixed 30 s test budgets kept clipping. The adoption drill
+  now allows 120 s, reports the measured boot time on every platform,
+  and dumps py-spy frames + the child's own log on failure.
 
 ## 0.2.5 — one authority, self-healing boot, housekeeping paid up
 
