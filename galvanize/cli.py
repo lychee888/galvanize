@@ -44,7 +44,8 @@ def cmd_init(args) -> int:
         print("  Hermes is not accepting webhooks yet. I can switch it on for you:")
         print(f"    - add platforms.webhook (port {hermes_mod.DEFAULT_PORT}) to:")
         print(f"      {hermes_home() / 'config.yaml'}")
-        print("    - your existing settings are kept; a backup is saved first.")
+        print("    - your existing settings and comments are kept (targeted edit;")
+        print("      a backup is saved first).")
         if args.yes or _confirm("  Do it? [Y/n] "):
             changed = _enable_webhook_in_config()
             if changed:
@@ -114,33 +115,145 @@ def _confirm(prompt: str) -> bool:
     return ans in ("", "y", "yes")
 
 
+def _webhook_block(indent: int) -> "list[str]":
+    pad = " " * indent
+    return [f"{pad}webhook:",
+            f"{pad}  enabled: true",
+            f"{pad}  extra:",
+            f"{pad}    port: {hermes_mod.DEFAULT_PORT}"]
+
+
+def _set_webhook_in_yaml_text(text: str) -> "str | None":
+    """Targeted text edit: flip platforms.webhook.enabled on WITHOUT
+    re-serializing the file (audit F13, card C6): comments, key order and
+    every byte outside the touched lines survive, matching the sibling
+    comment-safe path harnesses.register_codex uses for config.toml.
+
+    Shapes handled: no top-level `platforms:` (append block), existing
+    `platforms:` (insert/patch `webhook:` inside it), existing `webhook:`
+    (insert/patch `enabled:` inside it). A YAML-clever top-level value
+    (flow `platforms: {...}` on one line, or a non-mapping) returns None:
+    the caller falls back to the legacy full round-trip instead of guessing.
+    """
+    # Path.read_text() delivers universal newlines, so split on "\n" only.
+    nl = chr(10)
+    lines = text.split(nl) if text else []
+
+    def _is_key(ln: str, indent: int, key: str) -> bool:
+        return (ln.startswith(" " * indent + key) and
+                ln[len(" " * indent + key):].split("#")[0].strip().rstrip(":")
+                in ("", ":") and f"{key}:" in ln[:len(" " * indent + key) + len(key) + 1])
+
+    top = None          # index of the zero-indent `platforms:` line
+    for i, ln in enumerate(lines):
+        s = ln.split("#")[0].rstrip()
+        if s == "platforms:":
+            top = i
+            break
+        if s.startswith("platforms:") and s != "platforms:":
+            return None  # flow/scalar value on one line: out of targeted scope
+    body_end = len(lines)
+    if top is not None:
+        for j in range(top + 1, len(lines)):
+            ln = lines[j]
+            if ln.strip() and not ln[0].isspace() and not ln.lstrip().startswith("#"):
+                body_end = j
+                break
+    child = 2
+    if top is not None:
+        for j in range(top + 1, body_end):
+            if lines[j].strip() and not lines[j].lstrip().startswith("#"):
+                child = len(lines[j]) - len(lines[j].lstrip())
+                break
+    wk = None
+    if top is not None:
+        for j in range(top + 1, body_end):
+            if _is_key(lines[j], child, "webhook"):
+                wk = j
+                break
+    import re as _re
+    if wk is not None:
+        sub = child + 2
+        if lines[wk].strip().rstrip(":") != "webhook":
+            return None  # `webhook: <flow>` inline: out of targeted scope
+        wk_end = body_end
+        for j in range(wk + 1, body_end):
+            ln = lines[j]
+            if ln.strip() and (len(ln) - len(ln.lstrip())) <= child \
+                    and not ln.lstrip().startswith("#"):
+                wk_end = j
+                break
+        for j in range(wk + 1, wk_end):
+            m = _re.match(r"^(\s*)enabled:\s*(\S[^#]*?)?(\s*(?:#.*)?)$", lines[j])
+            if m and (len(lines[j]) - len(lines[j].lstrip())) >= child + 1:
+                if m.group(2) and m.group(2).strip() == "true":
+                    return None  # already enabled (caller's yaml check said no; odd shape)
+                sub = len(lines[j]) - len(lines[j].lstrip())
+                lines[j] = f"{' ' * sub}enabled: true{m.group(3)}"
+                return nl.join(lines)
+        lines[wk + 1:wk + 1] = [f"{' ' * sub}enabled: true"]
+        return nl.join(lines)
+    if top is not None:
+        lines[top + 1:top + 1] = _webhook_block(child)
+    else:
+        # No top-level platforms: append a full parent+block. Preserve the
+        # file's trailing-newline state exactly (split keeps one '' tail
+        # for files that end with a newline).
+        block = ["platforms:"] + _webhook_block(2)
+        if lines and lines[-1] == "":
+            lines = lines[:-1] + [""] + block
+        elif lines:
+            lines = lines + [""] + block
+        else:
+            lines = block
+    return nl.join(lines)
+
+
 def _enable_webhook_in_config() -> bool:
     """Flip platforms.webhook.enabled on in the user's hermes config.yaml.
 
-    Round-trips YAML (plain comments in the file are not preserved — we back
-    the file up to config.yaml.galvanize.bak first and say so).
+    F13 (card C6): targeted text edit — plain comments, ordering and every
+    unrelated byte in the file survive; we still back the file up to
+    config.yaml.galvanize.bak first. Only a file whose platforms/webhook
+    shape the targeted editor refuses falls back to a YAML round-trip
+    (which rewrites comments) — and the edit is validated by re-parse
+    before anything is written.
     """
-    import time
     import yaml
 
     cfg_path = hermes_home() / "config.yaml"
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg: dict = {}
     if cfg_path.exists():
-        cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        text = cfg_path.read_text(encoding="utf-8")
+        cfg = yaml.safe_load(text) or {}
+        if (((cfg.get("platforms") or {}).get("webhook") or {})
+                .get("enabled")):
+            return False
         backup = cfg_path.with_name("config.yaml.galvanize.bak")
         if not backup.exists():
             shutil.copy2(cfg_path, backup)
-    platforms = cfg.setdefault("platforms", {})
-    webhook = platforms.setdefault("webhook", {})
-    if webhook.get("enabled"):
-        return False
-    webhook["enabled"] = True
-    extra = webhook.setdefault("extra", {})
-    extra.setdefault("port", hermes_mod.DEFAULT_PORT)
-    cfg_path.write_text(
-        yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True), encoding="utf-8"
-    )
+    else:
+        text = ""
+    new_text = _set_webhook_in_yaml_text(text)
+    if new_text is None:
+        platforms = cfg.setdefault("platforms", {})
+        webhook = platforms.setdefault("webhook", {})
+        webhook["enabled"] = True
+        extra = webhook.setdefault("extra", {})
+        extra.setdefault("port", hermes_mod.DEFAULT_PORT)
+        new_text = yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True)
+    try:
+        check = yaml.safe_load(new_text) or {}
+        flips_on = bool((((check.get("platforms") or {}).get("webhook") or {})
+                         .get("enabled")))
+    except yaml.YAMLError:
+        flips_on = False
+    if not flips_on:
+        raise RuntimeError(
+            f"could not enable platforms.webhook in {cfg_path} without "
+            "changing unrelated settings; edit the file by hand")
+    cfg_path.write_text(new_text, encoding="utf-8")
     return True
 
 
@@ -272,7 +385,7 @@ def _ensure_galvanize_in_hermes_venv(quiet: bool = False) -> None:
     """pip-install galvanize into EVERY Hermes interpreter the plugin can run
     inside (the live gateway's own + the PATH one), so the plugin's in-process
     path works (pipx/uvx/standalone installs are invisible to it)."""
-    import subprocess
+    from . import winlaunch
 
     interps = _hermes_interpreters()
     if not interps:
@@ -282,9 +395,8 @@ def _ensure_galvanize_in_hermes_venv(quiet: bool = False) -> None:
     spec = str(src) if dev_checkout else _install_spec_for_pip()
     for interp in interps:
         try:
-            probe = subprocess.run(
-                [str(interp), "-c", "import galvanize"],
-                capture_output=True, text=True, timeout=30)
+            probe = winlaunch.run(
+                [str(interp), "-c", "import galvanize"], timeout=30)
             if probe.returncode == 0:
                 if not quiet:
                     _print_lines([f"✔ galvanize importable in Hermes interpreter {interp}."])
@@ -299,7 +411,7 @@ def _ensure_galvanize_in_hermes_venv(quiet: bool = False) -> None:
         if not quiet:
             _print_lines([f"Installing galvanize into {interp} (plugin needs it there)..."])
         try:
-            p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            p = winlaunch.run(cmd, timeout=300)
             if p.returncode == 0:
                 _print_lines([f"✔ galvanize installed into {interp} — plugin runs in-process."])
             else:
@@ -461,11 +573,23 @@ def cmd_test(args) -> int:
 def cmd_status(args) -> int:
     s = manage.status()
     da = "✔ running" if s["daemon_alive"] else "✖ not running"
+    snap = s.get("supervisor") or {}
+    cfg = s.get("config") or {}
+    cfg_tag = f"rev {cfg.get('revision', 0)}"
+    if cfg.get("state") and cfg["state"] != "ok":
+        cfg_tag = f"UNHEALTHY ({cfg['state']})"
+    tag = ""
+    if snap.get("state") == "ready":
+        tag = (f" [supervisor {snap.get('supervisor_pid')} → worker "
+               f"{(snap.get('worker') or {}).get('pid')}]")
+    elif snap.get("state"):
+        tag = f" [supervisor {snap.get('state')}]"
     gw = ""
     if s["webhook_enabled"]:
         gw = "  gateway: " + ("✔ reachable" if s["gateway_running"] else "✖ not reachable")
-    print(f"\n  daemon: {da} (heartbeat {s['daemon_heartbeat']})  webhook lane: "
+    print(f"\n  daemon: {da} (heartbeat {s['daemon_heartbeat']}){tag}  webhook lane: "
           + ("✔ enabled" if s["webhook_enabled"] else "✖ disabled") + gw)
+    print(f"  config: {cfg_tag} (SQLite authority; triggers.yaml is import/export)")
     if not s["triggers"]:
         print("  No triggers yet. Add one:")
         print("    galvanize add folder ~/Downloads/cad-drops --wake hermes")
@@ -498,9 +622,16 @@ def cmd_run(args) -> int:
     return 0
 
 
+def cmd_supervise(args) -> int:
+    from . import supervisor
+    return supervisor.main()
+
+
 def cmd_daemon(args) -> int:
     from . import autostart
     from . import state as state_mod
+    from . import supervisor as sup
+    from . import watchdog
     verb = args.verb
     if verb == "install":
         ok, lines = autostart.install()
@@ -512,18 +643,45 @@ def cmd_daemon(args) -> int:
                        else ", ".join(c["now"]))
                 lines.append(f"wake tools '{c['name']}' → {now}")
     elif verb == "remove":
+        snap = sup.snapshot()
+        if snap:
+            # Stop the supervisor before deregistering persistence, or it
+            # will faithfully respawn the worker behind our back.
+            sup.request_stop()
+            if not sup.wait_stopped(15):
+                sup.force_stop(snap)
         ok, lines = autostart.remove()
+    elif verb == "ensure":
+        # Runs once per minute from the Task Scheduler entry (card C3).
+        # Must stay cheap and NEVER raise: a nonzero rc every minute on a
+        # broken box would only ever show up in watchdog.log.
+        res = watchdog.ensure(getattr(args, "profile", None))
+        print(f"  watchdog: {res['action']} — {res['detail']}")
+        return 1 if res["action"] == "failed" else 0
     elif verb == "stop":
+        snap = sup.snapshot()
+        if snap:
+            sup.request_stop()
+            if sup.wait_stopped(15):
+                watchdog.pause()   # user intent: stay down (C3; resume on install)
+                print(f"  ✔ Supervisor stopped (pid {snap['supervisor_pid']}); "
+                      f"worker tree taken down with its job.")
+                return 0
+            sup.force_stop(snap)
+            watchdog.pause()
+            print(f"  ✔ Supervisor force-stopped (pid {snap['supervisor_pid']}); "
+                  f"job-close killed the worker tree.")
+            return 0
         hb = state_mod.get_heartbeat()
         pid = int(hb.get("pid") or 0) if hb else 0
         if not pid:
-            print("  Daemon not running (no heartbeat).")
+            print("  Daemon not running (no heartbeat, no supervisor).")
             return 1
         import signal
         try:
             os.kill(pid, signal.SIGTERM)
             state_mod.clear_heartbeat()
-            print(f"  ✔ Stopped daemon (pid {pid}).")
+            print(f"  ✔ Stopped unmanaged daemon (pid {pid}).")
             return 0
         except OSError as e:
             print(f"  ✖ Could not stop pid {pid}: {e}")
@@ -532,11 +690,31 @@ def cmd_daemon(args) -> int:
         hb = state_mod.get_heartbeat()
         import time as _t
         alive = bool(hb and _t.time() - float(hb.get("heartbeat", 0)) < 60)
+        snap = sup.snapshot()
+        print(f"  supervisor: " + (
+            f"{snap['state']} (pid {snap['supervisor_pid']}, "
+            f"worker pid {(snap.get('worker') or {}).get('pid')}, "
+            f"mutex {snap['mutex']['name']} [{snap['mutex']['scope']}], "
+            f"spawns {snap['spawn_count']})" if snap else "none (unmanaged or down)"))
         print(f"  running: {'yes (pid %s)' % hb.get('pid') if alive else 'no'}"
               f"   at-login start: {'✔ installed' if autostart.installed() else '✖ not installed'}")
+        p = watchdog.persistence_summary(getattr(args, "profile", None))
+        print(f"  persistence: {p['note']}   scope: {p['scope']}")
         return 0
     _print_lines(lines)
     return 0 if ok else 1
+
+
+def cmd_probe(args) -> int:
+    """`galvanize probe`: run the C4 capability manifest collection in
+    THIS interpreter (same code runtime.probe() launches candidates with)."""
+    from . import capability
+    m = capability.collect()
+    if getattr(args, "machine", False):
+        print(json.dumps(m))
+    else:
+        _print_lines(capability.render_lines(m))
+    return 0 if m["ok"] else 1
 
 
 def cmd_serve(args) -> int:
@@ -584,6 +762,43 @@ def cmd_mcp(args) -> int:
     return mcp_main()
 
 
+def cmd_config(args) -> int:
+    """`galvanize config show|export|import` — C5: the YAML is an artifact,
+    the SQLite revision is the authority."""
+    from . import config as cfg_mod
+    from . import store
+    verb = args.verb
+    if verb == "show":
+        s = store.summary()
+        print(f"  authority: {s['db']}")
+        print(f"  revision:  {s['revision']}   state: {s['state']}"
+              + (f"   note: {s['note']}" if s["note"] else ""))
+        names = sorted(cfg_mod.load_triggers())
+        print(f"  triggers:  {', '.join(names) if names else '(none activated)'}")
+        return 0 if s["state"] == "ok" else 1
+    if verb == "export":
+        p = cfg_mod.export_yaml(Path(args.path) if args.path else None)
+        print(f"  ✔ exported revision {store.current_revision()} -> {p}")
+        return 0
+    # import
+    r = cfg_mod.import_yaml(Path(args.path), dry_run=args.dry_run,
+                            expected_revision=(args.expect_revision
+                                               if args.expect_revision >= 0 else None))
+    if not r["ok"]:
+        for err in r.get("invalid", []):
+            print(f"  ✖ {err}")
+        print(f"  ✖ import rejected: {r['error']}")
+        print("    last-known-good config keeps serving; see: galvanize doctor")
+        return 1
+    if r.get("dry_run"):
+        print(f"  dry run: {len(r['triggers'])} trigger(s) valid; "
+              f"{r['changes']} name change(s) vs current rev {r['revision']}")
+        return 0
+    print(f"  ✔ activated revision {r['revision']} "
+          f"({len(r['triggers'])} trigger(s)); mirror rewritten")
+    return 0
+
+
 def cmd_doctor(args) -> int:
     if getattr(args, "fix", False):
         m = manage.refresh_route_grants()
@@ -593,6 +808,10 @@ def cmd_doctor(args) -> int:
             print(f"  ↻ wake tools '{c['name']}' → {now}")
         if not m["changed"]:
             print("  route toolsets already current")
+        rec = manage.reconcile_routes()
+        if rec["repaired"]:
+            print(f"  ↻ reconciled {rec['repaired']} route(s) from intent "
+                  "(gateway file drift)")
         print()
     r = manage.doctor()
     warns = 0
@@ -719,9 +938,22 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--verbose", action="store_true")
     sp.set_defaults(fn=cmd_run)
 
+    sp = sub.add_parser("supervise",
+                        help="run the single-instance supervisor (daemon-install target)")
+    sp.set_defaults(fn=cmd_supervise)
+
     sp = sub.add_parser("daemon", help="manage the background daemon (at-login start)")
-    sp.add_argument("verb", choices=["install", "remove", "status", "stop"])
+    sp.add_argument("verb", choices=["install", "remove", "status", "stop", "ensure"])
+    sp.add_argument("--profile", default=None,
+                    help="instance profile (watchdog task name; default $GALVANIZE_PROFILE)")
     sp.set_defaults(fn=cmd_daemon)
+
+    sp = sub.add_parser("probe",
+                        help="run the launch-equivalent capability probe in "
+                             "this interpreter (card C4 manifest)")
+    sp.add_argument("--json", action="store_true", dest="machine",
+                    help="print the raw v1 manifest JSON")
+    sp.set_defaults(fn=cmd_probe)
 
     sp = sub.add_parser("serve", help="versioned local API (status check; runs inside daemon)")
     sp.add_argument("--foreground", action="store_true", help="run it in this process")
@@ -731,8 +963,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("doctor", help="health check: surfaces, lane, daemon, paths, secrets")
     sp.add_argument("--fix", action="store_true",
                     help="migrate managed routes to v0.2.4 toolset semantics "
-                         "(parity default, recorded choices kept) before checking")
+                         "(parity default, recorded choices kept) and converge "
+                         "gateway routes from SQLite intent before checking")
     sp.set_defaults(fn=cmd_doctor)
+
+    sp = sub.add_parser("config",
+                        help="show/export/import the revisioned trigger config "
+                             "(SQLite is the authority; triggers.yaml is the mirror)")
+    sp.add_argument("verb", choices=["show", "export", "import"])
+    sp.add_argument("path", nargs="?", default="",
+                    help="yaml path (import: required; export: default triggers.yaml)")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="validate + diff without activating")
+    sp.add_argument("--expect-revision", type=int, default=-1,
+                    help="reject the import if the authority moved off this revision")
+    sp.set_defaults(fn=cmd_config)
 
     sp = sub.add_parser("secrets", help="manage the galvanize secret store (OS keyring)")
     sp.set_defaults(fn=cmd_secrets)

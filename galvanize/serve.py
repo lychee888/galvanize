@@ -102,15 +102,22 @@ def read_surfaces() -> Dict[str, str]:
 # ------------------------------------------------------------------ dispatch
 
 def call_op(op: str, body: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute one manage op. Raises ApiError on bad requests."""
+    """Execute one manage op. Raises ApiError on bad requests.
+
+    C5: config mutations run through the same transactional repository as
+    the CLI and the in-process plugin — offline, no daemon IPC. A stale
+    expected_revision comes back as 409 (conflict), never a silent clobber.
+    """
     from . import manage
+    from . import store
 
     if op == "version":
         return {"core_version": __version__, "api_version": API_VERSION}
     if op == "list":
         from .config import load_triggers
         ts = load_triggers()
-        return {"ok": True, "triggers": {n: t.to_dict() for n, t in ts.items()}}
+        return {"ok": True, "revision": store.current_revision(),
+                "triggers": {n: t.to_dict() for n, t in ts.items()}}
     if op == "status":
         return manage.status()
     if op == 'configure_dsh_profile':
@@ -134,8 +141,36 @@ def call_op(op: str, body: Dict[str, Any]) -> Dict[str, Any]:
         return manage.remove_trigger_op(str(body.get("name", "")))
     if op == "set_enabled":
         from .config import set_enabled as _set_enabled
-        ok = _set_enabled(str(body.get("name", "")), bool(body.get("enabled", True)))
-        return {"ok": ok, **({} if ok else {"error": "no such trigger"})}
+        exp = body.get("expected_revision")
+        try:
+            ok = _set_enabled(str(body.get("name", "")),
+                              bool(body.get("enabled", True)),
+                              expected_revision=(int(exp) if exp is not None else None))
+        except store.StaleRevisionError as e:
+            raise ApiError(409, str(e))
+        return {"ok": ok, "revision": store.current_revision(),
+                **({} if ok else {"error": "no such trigger"})}
+    if op == "config":
+        from . import config as cfg_mod
+        action = str(body.get("action", ""))
+        if action == "revision":
+            return {"ok": True, **store.summary()}
+        if action == "export":
+            path = cfg_mod.export_yaml(
+                Path(body["path"]) if body.get("path") else None)
+            return {"ok": True, "path": str(path)}
+        if action == "import":
+            if not body.get("path"):
+                raise ApiError(400, "config import needs 'path'")
+            exp = body.get("expected_revision")
+            r = cfg_mod.import_yaml(
+                Path(str(body["path"])),
+                dry_run=bool(body.get("dry_run")),
+                expected_revision=(int(exp) if exp is not None else None))
+            if r.get("conflict"):
+                raise ApiError(409, r["error"])
+            return r
+        raise ApiError(400, f"unknown config action '{action}'")
     if op == "test":
         return manage.test_trigger(str(body.get("name", "")), body.get("payload"))
     if op == "emit":

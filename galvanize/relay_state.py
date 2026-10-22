@@ -43,6 +43,14 @@ class RelayState:
 
     def stage(self, events, fetched_cursor):
         with self.db() as db:
+            # The ack cursor is the delivered-prefix watermark: every id at
+            # or below it (same lexicographic order the walk uses) was acked
+            # or quarantined. A server replay of one of those ids is a
+            # duplicate delivery, not a new event — and because F11 prunes
+            # the acked rows themselves, the watermark is what makes
+            # dedupe survive pruning.
+            ack_row = db.execute("SELECT value FROM meta WHERE key='ack'").fetchone()
+            acked_upto = ack_row[0] if ack_row else '0'
             for event in events:
                 event_id = str(event.get('id') or '') if isinstance(event, dict) else ''
                 if not event_id:
@@ -50,6 +58,8 @@ class RelayState:
                     event_id = 'invalid-' + hashlib.sha256(json.dumps(event, sort_keys=True).encode()).hexdigest()
                     db.execute("INSERT OR IGNORE INTO events(id,event,state,error) VALUES (?,?,'quarantined',?)",
                                (event_id, json.dumps(event), 'Missing stable event id'))
+                elif event_id <= acked_upto:
+                    continue  # replay of an event delivered before its row was pruned
                 else:
                     db.execute('INSERT OR IGNORE INTO events(id,event) VALUES (?,?)', (event_id, json.dumps(event)))
             if fetched_cursor:
@@ -79,6 +89,16 @@ class RelayState:
                     break
                 cursor = item['id']
             db.execute('INSERT OR REPLACE INTO meta VALUES (?,?)', ('ack', cursor))
+            # F11 (card C6): rows the cursor has walked past are durable
+            # history of a delivered event — nothing reads them again (the
+            # walk only cares about the FIRST non-ack row, which by
+            # construction sits above the cursor). Prune the acked prefix on
+            # every walk so a long-lived relay inbox cannot grow without
+            # bound. Quarantined/failed rows keep their visibility via
+            # failures(); acked rows are, by definition, not failures.
+            if cursor != '0':
+                db.execute("DELETE FROM events WHERE state='ack' AND id<=?",
+                           (cursor,))
 
     def defer(self, event_id, now=None, delay=2):
         """Wait for a gate without consuming dispatch attempts or acknowledging."""

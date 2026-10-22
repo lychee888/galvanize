@@ -72,7 +72,7 @@ def test_ensure_installs_into_every_interpreter_missing_the_pkg(tmp_path):
     good.mkdir(), bad.mkdir()
     with patch("galvanize.cli._hermes_interpreters",
                return_value=[good / "python.exe", bad / "python.exe"]), \
-         patch("subprocess.run", side_effect=fake_run):
+         patch("galvanize.winlaunch.run", side_effect=fake_run):
         cli._ensure_galvanize_in_hermes_venv(quiet=True)
     probes = [r for r in runs if "-c" in r]
     installs = [r for r in runs if "install" in r]

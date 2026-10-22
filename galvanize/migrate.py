@@ -86,9 +86,8 @@ def analyze_job(job: dict, scripts_dir: Optional[Path] = None) -> Dict[str, Any]
 def pause_cron_job(job_id: str) -> tuple:
     """Pause via `hermes cron pause` if importable CLI is around, else edit
     jobs.json directly (flag only the one job, atomic)."""
-    import subprocess
-    r = subprocess.run(["hermes", "cron", "pause", job_id],
-                       capture_output=True, text=True, timeout=60)
+    from . import winlaunch
+    r = winlaunch.run(["hermes", "cron", "pause", job_id], timeout=60)
     if r.returncode == 0:
         return True, (r.stdout or "paused").strip()
     # fall back to direct edit

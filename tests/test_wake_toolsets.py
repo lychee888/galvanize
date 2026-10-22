@@ -320,7 +320,7 @@ def test_mcp_schema_advertises_wake_tools():
 
 def test_version_bumped():
     from galvanize import __version__
-    assert __version__ == "0.2.4"
+    assert __version__ == "0.2.5"
     text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.2.4"' in text
-    assert "0.2.4" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert 'version = "0.2.5"' in text
+    assert "0.2.5" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")

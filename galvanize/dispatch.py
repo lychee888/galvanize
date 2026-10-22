@@ -20,8 +20,32 @@ import re
 from typing import Tuple
 
 from . import hermes as hermes_mod
-from . import state
+from . import state, winlaunch
+from .paths import ensure_home
 from .events import Event
+
+# F12: error details carry a generous tail; the FULL output lands in
+# <state dir>/wake_output/<trigger>.log (one file per trigger, overwritten
+# each wake, so nothing accumulates).
+DETAIL_TAIL = 2000
+
+
+def _dump_wake_output(name: str, command, status: str, stdout: str, stderr: str) -> str:
+    try:
+        d = ensure_home() / "wake_output"
+        d.mkdir(parents=True, exist_ok=True)
+        safe = re.sub(r"[^\w.-]", "_", name) or "wake"
+        p = d / f"{safe}.log"
+        p.write_text(
+            f"{status} | cmd={command!r}\n\n=== stdout ===\n{stdout}\n"
+            f"\n=== stderr ===\n{stderr}\n",
+            encoding="utf-8", errors="replace")
+        return str(p)
+    except Exception:
+        # The dump is diagnostic only: the wake result is already decided,
+        # and a weird runtime (e.g. monkeypatched os.name in tests) must
+        # never sink an otherwise-successful dispatch.
+        return "(unavailable)"
 
 
 def dispatch(trigger, event: Event, prompt: str) -> Tuple[bool, str]:
@@ -127,16 +151,20 @@ def _wake_shell(trigger, event: Event, prompt: str) -> Tuple[bool, str]:
     timeout = float(trigger.wake.get("timeout_s", 300) or 300)
     cwd = str(trigger.wake.get("workdir", "") or "") or None
     try:
-        proc = subprocess.run(
-            rendered, env=env, capture_output=True, text=True,
-            encoding="utf-8", errors="replace",   # never crash on non-UTF8 agent output
-            timeout=timeout, cwd=cwd, shell=not templated,
-            stdin=subprocess.DEVNULL,   # CLI agents must never wait on stdin
+        proc = winlaunch.run(
+            rendered, env=env, timeout=timeout, cwd=cwd, shell=not templated,
         )
-    except subprocess.TimeoutExpired:
-        return False, f"shell wake timed out after {timeout}s"
-    out = (proc.stdout or "")[-400:]
-    err = (proc.stderr or "")[-400:]
+    except subprocess.TimeoutExpired as exc:
+        # The launch primitive terminated the WHOLE tree via the job
+        # (audit F12): no cmd.exe orphan can keep a window alive.
+        path = _dump_wake_output(trigger.name, command, f"TIMEOUT after {timeout}s",
+                                 str(exc.output or ""), str(exc.stderr or ""))
+        return False, (f"shell wake timed out after {timeout}s; process tree killed "
+                       f"(partial output: {path})")
+    out = proc.stdout or ""
+    err = proc.stderr or ""
+    path = _dump_wake_output(trigger.name, command, f"exit {proc.returncode}", out, err)
     if proc.returncode == 0:
-        return True, f"exit 0: {out.strip() or 'ok'}"
-    return False, f"exit {proc.returncode}: {err.strip() or out.strip()}"
+        return True, f"exit 0: {out[-DETAIL_TAIL:].strip() or 'ok'}"
+    return False, (f"exit {proc.returncode}: {(err or out)[-DETAIL_TAIL:].strip()}"
+                   f" [full output: {path}]")

@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from . import hermes as hermes_mod
 from . import state as state_mod
+from . import store
 from .bus import TriggerBus
 from .config import (
     GlobalConfig,
@@ -389,9 +390,12 @@ def emit(name: str, payload: Optional[dict], source: str = "emit") -> Dict[str, 
 def status() -> Dict[str, Any]:
     """Everything `galvanize status` and the trigger_status tool render from."""
     ts = load_triggers()
+    cfg = store.summary()          # C5: authority state for the renderer
     hb = state_mod.get_heartbeat()
     daemon_age = _fmt_age(hb.get("heartbeat") if hb else None)
     daemon_alive = bool(hb and (time.time() - float(hb.get("heartbeat", 0)) < 60))
+    from . import supervisor as sup
+    supervisor_snap = sup.snapshot()
     folder_count = sum(1 for t in ts.values() if t.enabled and t.source_type == "folder")
 
     rows: List[Dict[str, Any]] = []
@@ -434,6 +438,11 @@ def status() -> Dict[str, Any]:
         rows.append(row)
 
     notes: List[str] = []
+    if cfg["state"] != "ok":
+        # C5: an unusable config authority is UNHEALTHY, never "no triggers".
+        notes.append(
+            f"config {cfg['state'].upper()}: {cfg['note'] or 'no valid config activated'} "
+            "— watchers run on the last committed revision")
     if folder_count and not daemon_alive:
         notes.append(f"{folder_count} folder trigger(s) need the daemon — start: galvanize run")
     wh_enabled = hermes_mod.webhook_enabled()
@@ -447,6 +456,8 @@ def status() -> Dict[str, Any]:
         "ok": True,
         "daemon_alive": daemon_alive,
         "daemon_heartbeat": daemon_age,
+        "config": cfg,
+        "supervisor": supervisor_snap,
         "webhook_enabled": wh_enabled,
         "gateway_running": (hermes_mod.gateway_running() if wh_enabled else False),
         "triggers": rows,
@@ -485,6 +496,10 @@ def doctor() -> Dict[str, Any]:
             entry["warn"] = True
         checks.append(entry)
 
+    # Card C5: the state authority checks go first — if galvanize.db is
+    # unreadable or a bad import is latched, everything downstream is noise.
+    checks.extend(store.doctor_rows())
+
     s = status()
     ts = load_triggers()
 
@@ -508,6 +523,48 @@ def doctor() -> Dict[str, Any]:
         ok = hermes_mod.gateway_running()
         add("gateway /health", ok, "" if ok else "start: hermes gateway run")
     add("daemon", s["daemon_alive"], f"heartbeat {s['daemon_heartbeat']}")
+    snap = s.get("supervisor")
+    if snap is None:
+        add("supervisor", True,
+            "unmanaged (no supervisor) — start: galvanize daemon install", warn=True)
+    elif snap.get("state") == "ready":
+        w = snap.get("worker") or {}
+        mx = snap.get("mutex") or {}
+        add("supervisor", True,
+            f"pid {snap.get('supervisor_pid')} → worker pid {w.get('pid')} "
+            f"(mutex {mx.get('name')} [{mx.get('scope')}], spawns {snap.get('spawn_count')})")
+    elif snap.get("state") == "halted":
+        add("supervisor", False, f"HALTED: {snap.get('halt_reason')}")
+    else:
+        add("supervisor", True, f"state {snap.get('state')} "
+                                f"(pid {snap['supervisor_pid']})", warn=True)
+    # Card C3: persistence must be stated, never silently downgraded. The
+    # minute-cadence watchdog task (Windows) / Restart=on-failure (systemd)
+    # is the guarantee; .lnk-only or nothing are surfaced with a reason.
+    from . import watchdog as _wd
+    p = _wd.persistence_summary()
+    if p["watchdog_applicable"]:
+        if p["watchdog_task"]:
+            add("persistence", True,
+                "watchdog task ✔ + startup .lnk" if p["startup_lnk"]
+                else "watchdog task only (no .lnk: start latency <= 60 s)",
+                warn=not p["startup_lnk"])
+        elif p["startup_lnk"]:
+            add("persistence", True,
+                "logon-only on this host (watchdog task not registered — "
+                "run: galvanize daemon install)", warn=True)
+        else:
+            add("persistence", False,
+                "NONE: no watchdog task and no startup .lnk — run: "
+                "galvanize daemon install")
+    else:
+        add("persistence", p["startup_lnk"], p["note"])
+    # Card C4 (audit F3): the three-way runtime identity diff — recorded
+    # manifest (install.json) vs what the persistence entry actually
+    # launches vs the live worker's READY identity/capabilities.
+    from . import runtime as _rt
+    for row in _rt.doctor_rows():
+        checks.append(row)
     serve_live = serve_mod.running_info() is not None
     add("serve api", serve_live,
         f"api v{serve_mod.API_VERSION}" if serve_live else "not running (galvanize serve)")
@@ -547,6 +604,24 @@ def doctor() -> Dict[str, Any]:
                 "toolsets: RESTRICTED — route registered by pre-v0.2.4 "
                 "galvanize (no key). fix: galvanize doctor --fix or re-add "
                 "this trigger", warn=True)
+
+    # C5: intent-vs-gateway-file drift (read-only detection here; the fix
+    # path is the daemon's minute reconcile or `doctor --fix`).
+    rec = hermes_mod.reconcile_routes(dry_run=True)
+    if rec["conflicts"]:
+        add("routes intent", False,
+            "foreign route holds our name(s): " + ", ".join(rec["conflicts"])
+            + " — rename the trigger or remove the user route")
+    elif rec["drifted"]:
+        add("routes intent", True,
+            f"{len(rec['drifted'])} managed route(s) drifted from the gateway "
+            "file; reconciling (daemon minute beat, or now: doctor --fix)",
+            warn=True)
+    else:
+        n_intents = len(store.route_intents())
+        add("routes intent", True,
+            f"{n_intents} managed route intent(s) match "
+            "webhook_subscriptions.json")
     return {"ok": all(c["ok"] for c in checks), "checks": checks}
 
 
@@ -577,6 +652,17 @@ def refresh_route_grants(dry_run: bool = False) -> Dict[str, Any]:
             hermes_mod.set_route_toolsets(name, want)
         changed.append({"name": name, "had": current, "now": want or None})
     return {"ok": True, "changed": changed, "dry_run": dry_run}
+
+
+def reconcile_routes(dry_run: bool = False) -> Dict[str, Any]:
+    """C5: converge webhook_subscriptions.json from the SQLite intent rows.
+
+    webhook_subscriptions.json stays gateway-owned; this is the converger
+    that makes the shared-writer risk self-healing (daemon minute beat +
+    `doctor --fix`). Returns the hermes-layer report verbatim:
+    {drifted, repaired, adopted, conflicts}.
+    """
+    return hermes_mod.reconcile_routes(dry_run=dry_run)
 
 
 def _hermes_config_has_mcp(hermes_home: Path) -> bool:

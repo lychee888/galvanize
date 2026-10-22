@@ -1,9 +1,17 @@
-"""Trigger definitions: the triggers.yaml spine + global config.
+"""Trigger definitions: SQLite authority + the triggers.yaml import/export mirror.
 
-One YAML holds all triggers (hot-reloaded by the daemon). Secrets are NOT
-stored here — HMAC secrets live in the Hermes subscriptions file that
-galvanize manages; anything sensitive belongs in the OS credential store
-later (v0.1 keeps the local trust boundary: everything is user-owned files).
+Since card C5 (audit F8/F9) the writable authority for trigger config is
+galvanize.db (see store.py): every editor — CLI, Hermes plugin, serve API,
+dashboard — goes through the same transactional repository with revision
+checks, offline, no daemon IPC in the consistency path. triggers.yaml is
+demoted to (a) the first-seed source on migration and (b) an import/export
+mirror that is rewritten after every activated change so humans can still
+read and version it; hand-edits to the YAML no longer hot-reload until you
+run `galvanize config import`. A corrupt import NEVER clobbers: the last
+committed revision keeps serving and the doctor row goes loud.
+
+Secrets are NOT stored in either artifact; anything sensitive lives in the
+OS credential store (secrets.py).
 """
 
 from __future__ import annotations
@@ -14,10 +22,11 @@ import secrets
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
+from . import store
 from .paths import config_path, ensure_home, triggers_path
 
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
@@ -175,63 +184,159 @@ def _atomic_write_yaml(path: Path, data: Any) -> None:
 
 
 # ---------------------------------------------------------------- registry
+#
+# The registry reads/writes the SQLite authority (store.py). `ensure_ready`
+# makes the one-time migration from the pre-C5 JSON files happen lazily at
+# whichever entry point touches the store first — supervisor startup, the
+# daemon, or a bare CLI call on a machine where nothing has run yet.
 
-def triggers_path_mtime() -> float:
-    p = triggers_path()
-    try:
-        return p.stat().st_mtime
-    except OSError:
-        return 0.0
+def _boot() -> None:
+    store.ensure_ready()
+
+
+def config_revision() -> int:
+    """Current activated config revision (daemon hot-reload poll target)."""
+    _boot()
+    return store.current_revision()
+
+
+def parse_triggers_yaml(text: str) -> Tuple[Dict[str, dict], List[str]]:
+    """Validate a YAML document into {name: body} without touching the db.
+
+    Returns (bodies, hard_errors). All-or-nothing: any hard error voids the
+    whole document (a partially-activated config would silently stop
+    watchers whose neighbours failed). A folder path that does not exist
+    right now is NOT a hard error — the doctor has a dedicated per-trigger
+    row for that.
+    """
+    data = yaml.safe_load(text)
+    raw = data.get("triggers") if isinstance(data, dict) else None
+    if raw is None:
+        return {}, ["document has no 'triggers:' mapping"]
+    if not isinstance(raw, dict):
+        return {}, ["'triggers:' is not a mapping"]
+    bodies: Dict[str, dict] = {}
+    hard: List[str] = []
+    for name, td in raw.items():
+        name = str(name)
+        if not isinstance(td, dict):
+            hard.append(f"{name}: not a mapping")
+            continue
+        t = Trigger.from_dict(name, td)
+        errs = [e for e in t.validate() if "folder path does not exist" not in e]
+        if errs:
+            hard.append(f"{name}: {'; '.join(errs)}")
+            continue
+        bodies[name] = t.to_dict()
+    return bodies, hard
 
 
 def load_triggers() -> Dict[str, Trigger]:
-    p = triggers_path()
-    if not p.exists():
-        return {}
+    _boot()
+    return {name: Trigger.from_dict(name, body)
+            for name, body in store.config_bodies().items()}
+
+
+def export_yaml(path: Optional[Path] = None) -> Path:
+    """Rewrite the triggers.yaml mirror from the authority (never the source)."""
+    _boot()
+    p = path or triggers_path()
+    payload = {"triggers": {name: body for name, body in
+                            sorted(store.config_bodies().items())}}
+    _atomic_write_yaml(p, payload)
+    return p
+
+
+def import_yaml(path: Path, *, dry_run: bool = False,
+                expected_revision: Optional[int] = None) -> Dict[str, Any]:
+    """Activate a YAML file as a new config revision, or fail loudly.
+
+    Corruption/invalidity keeps the committed last-known-good serving (the
+    watcher set does not change), records a loud store config_state, and
+    returns ok=False — the doctor row explains it until the next successful
+    activation.
+    """
+    _boot()
     try:
-        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return {}
-    out: Dict[str, Trigger] = {}
-    raw = data.get("triggers") if isinstance(data, dict) else None
-    if isinstance(raw, dict):
-        for name, td in raw.items():
-            if isinstance(td, dict):
-                out[str(name)] = Trigger.from_dict(str(name), td)
-    return out
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError as e:
+        store.note_config_state("corrupt", f"{path}: {e}")
+        return {"ok": False, "error": f"cannot read {path}: {e}"}
+    try:
+        bodies, hard = parse_triggers_yaml(text)
+    except yaml.YAMLError as e:
+        store.note_config_state("corrupt", f"unparseable YAML: {e}")
+        return {"ok": False, "error": f"unparseable YAML: {e}"}
+    if hard:
+        store.note_config_state("corrupt", "; ".join(hard)[:500])
+        return {"ok": False, "error": "; ".join(hard), "invalid": hard}
+    cur = store.current_revision()
+    if dry_run:
+        return {"ok": True, "dry_run": True, "revision": cur,
+                "triggers": sorted(bodies),
+                "changes": len(set(bodies) ^ set(store.config_bodies().keys()))}
+    try:
+        rev = store.replace_config(bodies, expected_revision=expected_revision,
+                                   note=f"import {Path(path).name}")
+    except store.StaleRevisionError as e:
+        return {"ok": False, "conflict": True, "error": str(e)}
+    export_yaml()
+    return {"ok": True, "revision": rev, "triggers": sorted(bodies)}
 
 
-def save_triggers(triggers: Dict[str, Trigger]) -> None:
-    ensure_home()
-    payload = {
-        "triggers": {name: t.to_dict() for name, t in sorted(triggers.items())}
-    }
-    _atomic_write_yaml(triggers_path(), payload)
+def save_triggers(triggers: Dict[str, Trigger], *,
+                  expected_revision: Optional[int] = None) -> int:
+    """Full-set write through the authority (revision-checked)."""
+    _boot()
+    rev = store.replace_config(
+        {name: t.to_dict() for name, t in triggers.items()},
+        expected_revision=expected_revision, note="save_triggers")
+    export_yaml()
+    return rev
 
 
-def upsert_trigger(t: Trigger) -> None:
-    ts = load_triggers()
-    ts[t.name] = t
-    save_triggers(ts)
+def upsert_trigger(t: Trigger, *,
+                   expected_revision: Optional[int] = None) -> int:
+    _boot()
+    rev = store.upsert_body(t.name, t.to_dict(),
+                            expected_revision=expected_revision,
+                            note=f"upsert {t.name}")
+    export_yaml()
+    return rev
 
 
-def remove_trigger(name: str) -> bool:
-    ts = load_triggers()
-    if name not in ts:
+def remove_trigger(name: str, *,
+                   expected_revision: Optional[int] = None) -> bool:
+    _boot()
+    if name not in store.config_bodies():
         return False
-    del ts[name]
-    save_triggers(ts)
+    store.delete_body(name, expected_revision=expected_revision,
+                      note=f"remove {name}")
+    export_yaml()
     return True
 
 
-def set_enabled(name: str, enabled: bool) -> bool:
-    ts = load_triggers()
-    t = ts.get(name)
-    if t is None:
-        return False
-    t.enabled = bool(enabled)
-    upsert_trigger(t)
-    return True
+def set_enabled(name: str, enabled: bool, *,
+                expected_revision: Optional[int] = None) -> bool:
+    """Flip one trigger's enabled flag inside ONE read-modify-write tx."""
+    _boot()
+    found = {"hit": False}
+
+    def _fn(bodies: Dict[str, dict]) -> None:
+        body = bodies.get(name)
+        if body is None:
+            return
+        found["hit"] = True
+        body["enabled"] = bool(enabled)
+
+    try:
+        rev = store.mutate_config(_fn, expected_revision=expected_revision,
+                                  note=f"set_enabled {name}")
+    except store.StaleRevisionError:
+        raise
+    if found["hit"]:
+        export_yaml()
+    return bool(found["hit"]) and rev > 0  # legacy bool contract
 
 
 def new_secret() -> str:

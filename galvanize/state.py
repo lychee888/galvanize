@@ -1,87 +1,57 @@
-"""Persistent per-trigger state: fires, errors, heartbeat.
+"""Persistent per-trigger run state: fires, errors, heartbeat, source health.
 
-state.json gives `galvanize status` its visibility-by-default numbers:
-last-fire, last-error, fires-today, and the daemon heartbeat (so a dead
-watcher shows up as a stale heartbeat instead of silent success).
+Card C5 (audit F8): every function here is a thin facade over the SQLite
+authority (store.py). The old design read, mutated, and rewrote ONE whole
+state.json per update — the main loop's heartbeat and a dispatcher thread's
+record_fire raced with each other by construction, and a torn write lost
+every counter at once. Heartbeat, per-trigger counters, and fire history are
+separate rows now; each mutation is one short IMMEDIATE transaction.
+
+`galvanize status` still gets its visibility-by-default numbers from here
+(last-fire, last-error, fires-today, daemon heartbeat — so a dead watcher
+shows up as a stale heartbeat instead of silent success).
 """
 
 from __future__ import annotations
 
-import json
+import hashlib
 import os
-import tempfile
 import time
-from datetime import date
-from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .paths import ensure_home, state_path
+from . import store
 
 
 def _load() -> Dict[str, Any]:
-    p = state_path()
-    if not p.exists():
-        return {}
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def _save(state: Dict[str, Any]) -> None:
-    ensure_home()
-    path = state_path()
-    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent), text=True)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(state, fh, indent=2)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    """Whole-file compatibility view (legacy callers). Prefer get()."""
+    store.ensure_ready()
+    out = store.all_trigger_state()
+    hb = store.get_heartbeat()
+    if hb:
+        out["_daemon"] = hb
+    return out
 
 
 def record_fire(trigger_name: str, *, ok: bool, detail: str = "") -> None:
-    state = _load()
-    t = state.setdefault(trigger_name, {})
-    now = time.time()
-    if ok:
-        t["last_fire"] = now
-        t["last_error"] = None
-        today = date.today().isoformat()
-        if t.get("fires_date") != today:
-            t["fires_date"] = today
-            t["fires_today"] = 0
-        t["fires_today"] = int(t.get("fires_today", 0)) + 1
-    else:
-        t["last_error"] = detail[:400]
-        t["last_error_at"] = now
-    _save(state)
+    store.record_fire(trigger_name, ok, detail)
 
 
 def set_heartbeat() -> None:
-    state = _load()
-    state["_daemon"] = {"heartbeat": time.time(), "pid": os.getpid()}
-    _save(state)
+    store.set_heartbeat(pid=os.getpid())
 
 
 def clear_heartbeat() -> None:
-    state = _load()
-    if state.pop("_daemon", None) is not None:
-        _save(state)
+    store.clear_heartbeat()
 
 
 def get_heartbeat() -> Optional[dict]:
-    return _load().get("_daemon")
+    store.ensure_ready()
+    return store.get_heartbeat()
 
 
 def live_daemon_pid(max_age_s: float = 60.0) -> Optional[int]:
     """PID of the daemon whose heartbeat is still fresh, else None."""
-    hb = _load().get("_daemon")
+    hb = get_heartbeat()
     if not hb:
         return None
     try:
@@ -93,35 +63,26 @@ def live_daemon_pid(max_age_s: float = 60.0) -> Optional[int]:
 
 
 def get(trigger_name: str) -> Dict[str, Any]:
-    return _load().get(trigger_name, {})
+    store.ensure_ready()
+    return store.trigger_state(trigger_name)
 
 
-def last_dispatch(trigger_name: str) -> Optional[str]:
-    """Last successful dispatch response (for `test` feedback)."""
-    return None
-
-
-def _health_path(key: str) -> Path:
-    import hashlib
-    return ensure_home() / ('source-' + hashlib.sha256(key.encode()).hexdigest() + '.json')
-
-
-def set_source_health(key: str, connected: bool, error: str = '') -> None:
-    """Independent files avoid overwriting dispatch counters from watcher threads."""
-    path = _health_path(key)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix='.health-', suffix='.tmp')
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-            json.dump({'connected': connected, 'error': error, 'ts': time.time(), 'pid': os.getpid()}, stream)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+# F14 (card C6): the pre-C5 `last_dispatch()` stub is gone — after config
+# feedback moved onto store.fire_history(), no caller ever read the stub.
 
 
 def source_health(key: str, daemon_pid=None) -> dict:
     try:
-        health = json.loads(_health_path(key).read_text(encoding='utf-8'))
+        store.ensure_ready()
+        health = store.source_health_row(key)
+        if health is None:
+            # Pre-C5 migration stored legacy source-<hash>.json files under
+            # their hashed name; fall back so freshly-migrated health still
+            # reads until the watcher rewrites it under the plain key.
+            health = store.source_health_row(
+                "legacy:" + hashlib.sha256(key.encode()).hexdigest())
+        if health is None:
+            return {'connected': False, 'error': 'watcher has not connected'}
         age = time.time() - health['ts']
         if daemon_pid is not None:
             if health['pid'] != daemon_pid:
@@ -141,5 +102,12 @@ def source_health(key: str, daemon_pid=None) -> dict:
         if age > 60:
             return {'connected': False, 'error': 'stale watcher health'}
         return health
-    except (OSError, ValueError, KeyError):
-        return {'connected': False, 'error': 'watcher has not connected'}
+    except Exception:
+        # A store that cannot be read is loud in doctor; one health lookup
+        # must never take the status renderer down with it.
+        return {'connected': False, 'error': 'state store unreadable'}
+
+
+def set_source_health(key: str, connected: bool, error: str = '') -> None:
+    """One UPSERT row per watcher — no whole-file rmw, no cross-thread loss."""
+    store.set_source_health(key, connected, error)

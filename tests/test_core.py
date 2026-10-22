@@ -176,32 +176,49 @@ def test_wake_preset_codex_adds_successfully(isolated_homes):
 # ---------------------------------------------------- daemon liveness / status
 
 def test_live_daemon_pid_respects_heartbeat_age(isolated_homes):
+    import time as _t
     from galvanize import state as st
+    from galvanize import store
     assert st.live_daemon_pid() is None            # no heartbeat at all
     st.set_heartbeat()
     assert st.live_daemon_pid() == os.getpid()     # fresh beat -> this pid
-    p = isolated_homes["galvanize"] / "state.json"
-    data = json.loads(p.read_text())
-    data["_daemon"]["heartbeat"] -= 120            # force stale
-    p.write_text(json.dumps(data))
+    store.set_heartbeat(pid=os.getpid(), ts=_t.time() - 120)   # force stale
     assert st.live_daemon_pid() is None
+    assert st.get_heartbeat()                      # C5: the beat stays visible
 
 
 def test_daemon_run_refuses_second_instance(isolated_homes, monkeypatch, capsys):
+    # C2 semantics (replaces the age-based peek that was the F1 TOCTOU):
+    # refusal requires a LIVE other instance or the mutex authority held.
+    import os
+    import time as _t
     from galvanize import state as st
+    from galvanize import store
     from galvanize.daemon import Daemon
-    st.set_heartbeat()                             # marks THIS pid alive…
-    st._save({**st._load(), "_daemon": {"heartbeat": __import__("time").time(), "pid": 999999}})
-    Daemon().run()                                 # …so run() must refuse, not double-watch
+    store.set_heartbeat(pid=4, ts=_t.time())        # "System" pid: always alive
+    Daemon().run()
     assert "already running" in capsys.readouterr().out
+    # Dead-owner beat (pid 999999) no longer refuses (adoption path, covered
+    # by tests/test_supervisor.py subprocess tests); the mutex refusal works
+    # in-process as a threadless short-circuit:
+    from galvanize import supervisor as sup
+    claim = sup.claim_mutex(os.environ["GALVANIZE_PROFILE"])
+    try:
+        Daemon().run()
+        assert "already running" in capsys.readouterr().out
+    finally:
+        claim.release()
 
 
 def test_status_fires_today_requires_matching_date(isolated_homes, hermes_cfg):
     from galvanize import manage
-    from galvanize.state import state_path
+    from galvanize import store
     yesterday = (date.today() - __import__("datetime").timedelta(days=1)).isoformat()
-    state_path().write_text(json.dumps({
-        "t1": {"fires_date": yesterday, "fires_today": 4, "last_fire": None}}))
+    with store.write_tx() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO trigger_state"
+            "(name, last_fire, last_error, last_error_at, fires_date, fires_today) "
+            "VALUES('t1', NULL, NULL, NULL, ?, 4)", (yesterday,))
     upsert_trigger(Trigger(name="t1", source={"type": "emit"}, wake={"kind": "log"}))
     row = next(r for r in manage.status()["triggers"] if r["name"] == "t1")
     assert row["fires_today"] == 0                 # stale count must not render as today's

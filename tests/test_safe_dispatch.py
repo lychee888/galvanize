@@ -33,7 +33,7 @@ def test_posix_templates_split_before_event_substitution():
     trigger = Trigger('demo', {'type': 'emit'}, {'kind': 'shell', 'command': 'agent --prompt "{prompt}" --payload "{payload}"'})
     event = Event('demo', 'emit', 'changed', {'title': '$HOME; $(touch nope)'})
     prompt = '$HOME; $(touch nope) quotes " and spaces {payload}'
-    with patch.object(dispatch.os, 'name', 'posix'), patch.object(dispatch.subprocess, 'run') as run:
+    with patch.object(dispatch.os, 'name', 'posix'), patch.object(dispatch.winlaunch, 'run') as run:
         run.return_value = subprocess.CompletedProcess([], 0, 'ok', '')
         assert dispatch._wake_shell(trigger, event, prompt)[0]
     assert run.call_args.args[0] == ['agent', '--prompt', prompt, '--payload', json.dumps(event.to_body(), ensure_ascii=False)]

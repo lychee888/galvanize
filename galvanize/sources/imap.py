@@ -29,43 +29,35 @@ from imap_tools import MailBox, MailBoxUnencrypted, ImapToolsError
 
 from ..events import Event
 from .. import state as health_state
+from .. import store
 from ..paths import ensure_home, galvanize_home
 
 logger = logging.getLogger("galvanize.imap")
 
 IDLE_REARM_S = 1500  # 25 min — safely under RFC 2177's 29-minute advice
 MAX_BACKOFF_S = 300
-STATE_NAME = "imap_state.json"
 FETCH_LIMIT = 50
 
 
-def _state_path() -> Path:
-    return galvanize_home() / STATE_NAME
-
-
 class _StateStore:
+    """C5: resume anchors live in galvanize.db (imap_state rows).
+
+    One row per watcher: two watchers re-anchoring simultaneously cannot
+    clobber each other the way the shared imap_state.json did. The lock
+    only serializes this process's own read-modify-write of a watcher's
+    seen-set between its drain calls.
+    """
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._data: Dict[str, Any] = {}
-        p = _state_path()
-        if p.exists():
-            try:
-                self._data = json.loads(p.read_text(encoding="utf-8"))
-            except Exception:
-                self._data = {}
 
     def get(self, key: str) -> dict:
         with self._lock:
-            return dict(self._data.get(key) or {})
+            return store.imap_get(key)
 
     def put(self, key: str, value: dict) -> None:
         with self._lock:
-            self._data[key] = value
-            ensure_home()
-            p = _state_path()
-            tmp = p.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
-            os.replace(tmp, p)
+            store.imap_put(key, value)
 
 
 _STATE = _StateStore()

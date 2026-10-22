@@ -14,15 +14,19 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import sys
 import threading
 import time
+from logging.handlers import RotatingFileHandler
 from typing import Dict
 
+from . import hermes as hermes_mod
 from . import state
+from . import store
 from .bus import TriggerBus
-from .config import Trigger, load_triggers, triggers_path_mtime
+from .config import Trigger, load_triggers
 from .events import Event
-from .paths import ensure_home, log_path, pid_path
+from .paths import ensure_home, log_path
 from .sources.folder import FolderWatcher
 
 logger = logging.getLogger("galvanize.daemon")
@@ -30,7 +34,10 @@ logger = logging.getLogger("galvanize.daemon")
 
 def _setup_logging(verbose: bool) -> None:
     ensure_home()
-    handler = logging.FileHandler(log_path(), encoding="utf-8")
+    # Rotating (audit F10, folded into C2): the old plain FileHandler grew
+    # ~13 MB/yr unbounded. Same budget as supervisor.log: 2 MB x 3 backups.
+    handler = RotatingFileHandler(str(log_path()), maxBytes=2_000_000,
+                                  backupCount=3, encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     root = logging.getLogger("galvanize")
     root.setLevel(logging.DEBUG if verbose else logging.INFO)
@@ -46,6 +53,8 @@ class Daemon:
         self._watcher: FolderWatcher | None = None
         self._folder_triggers: Dict[str, dict] = {}
         self._imap_watchers: Dict[str, dict] = {}  # name -> (watcher, sig)
+        self._imap_deps_missing: list = []
+        self._claim = None
 
     # ---- watcher lifecycle -------------------------------------------------
 
@@ -69,11 +78,18 @@ class Daemon:
         except ImportError:
             # e.g. a git checkout without `pip install -e .[imap]`-style deps:
             # one loud error beats killing the whole daemon at startup.
-            if self._imap_signature(triggers):
+            # C2 READY: this class of failure can NOT be fixed by respawn —
+            # record it permanent so the supervisor can halt instead of
+            # looping (judge: capability-permanent failure => stop retrying).
+            missing = sorted(self._imap_signature(triggers))
+            self._imap_deps_missing = missing
+            if missing:
                 logger.error("imap trigger(s) configured but 'imap-tools' is "
                              "not importable — daemon continues without imap "
-                             "watching (pip install imap-tools)")
+                             "watching (pip install imap-tools): %s",
+                             ", ".join(missing))
             return
+        self._imap_deps_missing = []
         from . import secrets as secrets_mod
 
         sig = self._imap_signature(triggers)
@@ -157,23 +173,102 @@ class Daemon:
                 logger.error("trigger %s: %s", trigger_name, detail)
         return _emit
 
+    # ---- READY protocol (card C2 §2) -----------------------------------------
+
+    def _readiness(self, serve_ok: bool = False) -> dict:
+        """Payload for supervisor.post_worker_ready: interpreter identity,
+        version, capabilities and per-watcher status. A watcher whose hard
+        dependency cannot be imported is a PERMANENT failure (respawning
+        cannot fix it; the supervisor halts rather than looping); anything
+        network/auth shaped stays transient."""
+        import platform
+        from . import __version__
+        watchers: Dict[str, dict] = {}
+        for name in self._folder_triggers:
+            alive = bool(self._watcher and self._watcher._observer.is_alive())
+            watchers[name] = {"type": "folder",
+                              "state": "running" if alive else "dead",
+                              "permanent": False}  # respawn restarts observers
+        for name, (w, _sig) in self._imap_watchers.items():
+            thread_alive = bool(getattr(w, "_thread", None)
+                                and w._thread.is_alive())
+            watchers[name] = {
+                "type": "imap",
+                "state": ("connected" if getattr(w, "connected", False)
+                          else "backoff" if thread_alive else "dead"),
+                "permanent": False,  # auth/network errors retry forever; only
+                                     # dep-missing below is permanent
+            }
+        for name in self._imap_deps_missing:
+            watchers[name] = {"type": "imap", "state": "failed-deps",
+                              "permanent": True,
+                              "error": "imap-tools not importable"}
+        imap_ok = not self._imap_deps_missing
+        # C4: ride the SAME capability manifest the installer probed
+        # (galvanize.capability) so doctor's three-way diff compares like
+        # with like; runtime-observed imap/serve/relay flags win.
+        from . import capability as _cap
+        cm = _cap.collect()
+        caps = dict(cm.get("capabilities") or {})
+        caps.update({"imap": imap_ok, "serve": bool(serve_ok),
+                     "relay": getattr(self, "_relay", None) is not None})
+        return {
+            "pid": os.getpid(),
+            "exe": sys.executable,
+            "version": __version__,
+            "python": platform.python_version(),
+            "caps_schema": cm.get("schema"),
+            "cap_failures": cm.get("failures") or [],
+            "capabilities": caps,
+            "watchers": watchers,
+        }
+
     # ---- main loop ---------------------------------------------------------
 
     def run(self, verbose: bool = False) -> None:
         _setup_logging(verbose)
         ensure_home()
-        # Single instance: a second daemon double-watches every mailbox (both
-        # connect, both race to advance the UID anchor, one may miss events)
-        # and desyncs heartbeat pid from watcher health pids, which makes
-        # `status` lie about staleness. Refuse to join an alive daemon.
+        # Single instance, by CONSTRUCTION (audit F1 / card C2): the named
+        # mutex is the authority, not a startup-only heartbeat peek (that
+        # was the TOCTOU that let two daemons coexist for 20h). Under a
+        # supervisor the claim was already made before this process existed;
+        # a direct `galvanize run` must claim the same authority itself so
+        # it can never join (or race) a running supervisor-managed daemon.
+        supervised = bool(os.environ.get("GALVANIZE_READY_TOKEN"))
+        self._claim = None
+        if not supervised:
+            from . import supervisor as sup
+            try:
+                self._claim = sup.claim_mutex(
+                    os.environ.get("GALVANIZE_PROFILE", "").strip() or "default")
+            except sup.MutexHeld as held:
+                snap = sup.snapshot() or {}
+                why = (f"supervisor pid {snap.get('supervisor_pid')} owns it"
+                       if snap else f"authority held ({held.name})")
+                logger.error("daemon: refusing to start; %s", why)
+                print(f"  ✖ galvanize daemon already running — {why};"
+                      f" stop it first: galvanize daemon stop")
+                return
+        # Belt-and-braces refusal: a fresh heartbeat from a process that is
+        # ACTUALLY ALIVE means something else owns the watchers (a legacy
+        # pre-C2 daemon, or an unmanaged run that raced us). A fresh-looking
+        # beat from a recently-KILLED worker must not stall the supervisor's
+        # respawn for 60s (drill 2026-10-21 21:22): pid-liveness, not age,
+        # is the fact; age is only the tiebreaker for a live process we
+        # cannot probe.
         live = state.live_daemon_pid()
         if live and live != os.getpid():
-            logger.error("daemon: another instance is alive (pid %d, heartbeat fresh) "
-                         "— refusing to start a second; stop it first: galvanize daemon stop",
-                         live)
-            print(f"  ✖ galvanize daemon already running (pid {live}).")
-            return
-        pid_path().write_text(str(__import__("os").getpid()), encoding="utf-8")
+            from . import supervisor as _sup
+            if _sup.pid_alive(live):
+                if self._claim is not None:
+                    self._claim.release()
+                    self._claim = None
+                logger.error("daemon: another instance is alive (pid %d, heartbeat fresh) "
+                             "— refusing to start a second; stop it first: galvanize daemon stop",
+                             live)
+                print(f"  ✖ galvanize daemon already running (pid {live}).")
+                return
+            logger.warning("daemon: adopting stale heartbeat from dead pid %d", live)
         # serve = versioned external API (dsh plugin, mcp clients). Embedded
         # on a daemon thread so at-login autostart keeps it alive with zero
         # extra services; harmless if nothing connects.
@@ -186,15 +281,24 @@ class Daemon:
         except Exception:
             logger.exception("serve api failed to start (continuing without it)")
         try:
+            store.ensure_ready()   # C5: import legacy JSON/YAML state once
             triggers = load_triggers()
             self._rebuild_watchers(triggers)
-            last_mtime = triggers_path_mtime()
-            logger.info("daemon started (%d triggers)", len(triggers))
+            last_rev = store.current_revision()
+            logger.info("daemon started (%d triggers, config rev %d)",
+                        len(triggers), last_rev)
             state.set_heartbeat()
             last_beat = time.time()
+            if supervised:
+                # Card C2 §2: watchers are built and the first beat exists —
+                # post the authenticated READY the supervisor waits on.
+                from . import supervisor as sup
+                sup.post_worker_ready(self._readiness(serve_ok=bool(serve_httpd)))
 
             def _term(signum, frame):
                 self._stop.set()
+
+            last_recon = 0.0
 
             for sig in (getattr(signal, "SIGINT", None), getattr(signal, "SIGTERM", None)):
                 if sig is not None:
@@ -205,9 +309,16 @@ class Daemon:
 
             while not self._stop.is_set():
                 time.sleep(2.0)
-                mtime = triggers_path_mtime()
-                if mtime != last_mtime:
-                    last_mtime = mtime
+                # C5: hot-reload keys off the DB revision, not file mtime —
+                # every editor (CLI, plugin, serve) bumps the revision in
+                # the same transaction that lands the rows.
+                try:
+                    rev = store.current_revision()
+                except Exception:
+                    logger.exception("config revision poll failed — retry next tick")
+                    continue
+                if rev != last_rev:
+                    last_rev = rev
                     try:
                         self._rebuild_watchers(load_triggers())
                     except Exception:
@@ -217,6 +328,18 @@ class Daemon:
                     for name in self._folder_triggers:
                         state.set_source_health('folder:' + name, bool(self._watcher and self._watcher._observer.is_alive()))
                     last_beat = time.time()
+                    if time.time() - last_recon >= 60:
+                        # C5: the gateway file is shared-writer territory;
+                        # converge managed routes from intent every minute so
+                        # a gateway/user clobber is self-healing, not silent.
+                        last_recon = time.time()
+                        try:
+                            rec = hermes_mod.reconcile_routes()
+                            if rec["repaired"] or rec["adopted"]:
+                                logger.info("route reconcile: repaired=%s adopted=%s conflicts=%s",
+                                            rec["drifted"], rec["adopted"], rec["conflicts"])
+                        except Exception:
+                            logger.exception("route reconcile failed (retry next beat)")
         finally:
             relay = getattr(self, '_relay', None)
             if relay is not None:
@@ -236,8 +359,7 @@ class Daemon:
                 except Exception:
                     pass
             state.clear_heartbeat()
-            try:
-                pid_path().unlink(missing_ok=True)
-            except OSError:
-                pass
+            if getattr(self, "_claim", None) is not None:
+                self._claim.release()
+                self._claim = None
             logger.info("daemon stopped")

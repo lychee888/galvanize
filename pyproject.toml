@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "galvanize"
-version = "0.2.4"
+version = "0.2.5"
 description = "Event-driven activation points for AI agents: wake a fresh Hermes (or any CLI agent) session when something happens."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -34,6 +34,10 @@ classifiers = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# Declared for the C4 app-owned runtime provisioning command
+# (`pip install galvanize[imap]`); the imap/keyring deps are core since
+# 0.2, so the extra is an intent marker + forward compatibility.
+imap = ["imap-tools>=1.10,<2", "keyring>=24,<26"]
 
 [project.urls]
 Homepage = "https://github.com/lychee888/galvanize"

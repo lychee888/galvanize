@@ -50,9 +50,17 @@ def test(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
 @router.post("/toggle")
 def toggle(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     from galvanize.config import set_enabled
+    from galvanize.store import StaleRevisionError
     name = str(body.get("name", "")).strip()
     enabled = bool(body.get("enabled", True))
-    if not set_enabled(name, enabled):
+    exp = body.get("expected_revision")
+    try:
+        ok = set_enabled(name, enabled,
+                         expected_revision=(int(exp) if exp is not None else None))
+    except StaleRevisionError as e:
+        # C5: the dashboard's snapshot went stale — 409, never a silent clobber.
+        raise HTTPException(status_code=409, detail=str(e))
+    if not ok:
         raise HTTPException(status_code=404, detail=f"no trigger '{name}'")
     return {"ok": True, "name": name, "enabled": enabled}
 

@@ -37,7 +37,11 @@ def _fallback_path() -> Path:
 # can't collide, and treat a failed delete as harmless cleanup noise.
 _PROBE_KEY = f"__probe__{os.getpid()}"
 _probe_ok: Optional[bool] = None
-_probe_lock = threading.Lock()
+# RLock + held AROUND the whole roundtrip: the Windows Credential Manager
+# backend (WinVaultKeyring) loses concurrent set/get calls from ONE
+# process even on distinct keys (C4 live drift: worker READY said
+# keyring=False while a watcher thread's probe and the collect raced).
+_probe_lock = threading.RLock()
 
 
 def _reset_probe_cache() -> None:
@@ -59,27 +63,59 @@ def _keyring_backend_ok() -> bool:
 
 
 def _probe_keyring_once() -> bool:
+    return keyring_status()["usable"]
+
+
+def keyring_status() -> dict:
+    """FRESH (never memoized) keyring health report — card C4's capability
+    gate and the runtime probe both need the backend identity and a real
+    set/get/delete roundtrip result, and must not inherit this process's
+    memo. Probes without triggering GUI unlock prompts on macOS; delete
+    failure is cleanup noise and never invalidates a good read."""
+    out = {"usable": False, "backend": None, "roundtrip": False,
+           "backend_missing": False}
+    # Per-CALL unique credential + the module RLock: two threads in ONE
+    # process (a watcher's memoized first-use probe vs the C4 capability
+    # collect) must not interleave — same collision class the pid-scoping
+    # fixed in the 2026-10-20 audit, one level finer.
+    probe_key = f"{_PROBE_KEY}.{os.urandom(4).hex()}"
+    with _probe_lock:
+        return _keyring_status_locked(out, probe_key)
+
+
+def _keyring_status_locked(out: dict, probe_key: str) -> dict:
     try:
         import keyring
-        from keyring.errors import NoKeyringError
-        try:
-            # Probe without triggering GUI unlock prompts on macOS:
-            backend = keyring.get_keyring()
-            name = getattr(backend, "name", "") or type(backend).__name__
-            if "fail" in name.lower() or "null" in name.lower():
-                return False
-            # A trivial write/read proves usability on Windows Credential Manager
-            keyring.set_password(SERVICE, _PROBE_KEY, "1")
-            ok = keyring.get_password(SERVICE, _PROBE_KEY) == "1"
-            try:
-                keyring.delete_password(SERVICE, _PROBE_KEY)
-            except Exception:
-                pass  # delete is cleanup; its failure never invalidates the ok read
-            return ok
-        except (NoKeyringError, Exception):
-            return False
     except ImportError:
-        return False
+        out["error"] = "keyring package not importable"
+        out["backend_missing"] = True
+        return out
+    from keyring.errors import NoKeyringError
+    try:
+        backend = keyring.get_keyring()
+        name = getattr(backend, "name", "") or type(backend).__name__
+        out["backend"] = name
+        if "fail" in name.lower() or "null" in name.lower():
+            out["error"] = f"no usable backend (selected: {name})"
+            return out
+        # A trivial write/read proves usability on Windows Credential Manager
+        keyring.set_password(SERVICE, probe_key, "1")
+        ok = keyring.get_password(SERVICE, probe_key) == "1"
+        out["roundtrip"] = ok
+        out["usable"] = ok
+        if not ok:
+            out["error"] = "set/get roundtrip mismatch"
+        try:
+            keyring.delete_password(SERVICE, probe_key)
+        except Exception:
+            pass
+        return out
+    except NoKeyringError as e:
+        out["error"] = f"NoKeyringError: {e}"[:200]
+        return out
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"[:200]
+        return out
 
 
 def _fallback_store() -> dict:

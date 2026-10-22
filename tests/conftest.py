@@ -19,6 +19,12 @@ def isolated_homes(tmp_path, monkeypatch):
     # Determinism: never read the real user's himalaya config in tests
     # (empty value = explicitly disabled; tests point it at a fixture).
     monkeypatch.setenv("GALVANIZE_HIMALAYA_CONFIG", "")
+    # C2: per-test instance authority so parallel/serial supervisor tests
+    # never collide with a real user's running daemon (same-SID mutex).
+    import hashlib
+    monkeypatch.setenv(
+        "GALVANIZE_PROFILE",
+        "t-" + hashlib.sha1(str(ghome).encode()).hexdigest()[:8])
     yield {"galvanize": ghome, "hermes": hhome}
 
 

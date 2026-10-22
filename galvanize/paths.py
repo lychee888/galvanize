@@ -50,8 +50,39 @@ def log_path() -> Path:
     return galvanize_home() / "galvanize.log"
 
 
-def pid_path() -> Path:
-    return galvanize_home() / "daemon.pid"
+def supervisor_log_path() -> Path:
+    return galvanize_home() / "supervisor.log"
+
+
+def supervisor_status_path() -> Path:
+    """The supervisor's self-published state (single-instance authority
+    snapshot; readers must check tick freshness, see supervisor.snapshot)."""
+    return galvanize_home() / "supervisor.json"
+
+
+def pause_flag_path() -> Path:
+    """Watchdog pause marker (card C3): `daemon stop` touches it so the
+    minute-cadence watchdog does not resurrect an intentionally-stopped
+    daemon; the supervisor unlinks it at serve() start (intent-up)."""
+    return galvanize_home() / "supervisor.pause"
+
+
+def watchdog_log_path() -> Path:
+    return galvanize_home() / "watchdog.log"
+
+
+def ready_path() -> Path:
+    """Worker -> supervisor authenticated READY post (token + pid + caps)."""
+    return galvanize_home() / "ready.json"
+
+
+def shutdown_flag_path() -> Path:
+    return galvanize_home() / "supervisor.shutdown"
+
+
+def claim_lock_path() -> Path:
+    """POSIX stand-in for the Windows named mutex (same authority role)."""
+    return galvanize_home() / "supervisor.lock"
 
 
 def ensure_home() -> Path:

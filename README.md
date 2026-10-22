@@ -34,6 +34,27 @@ galvanize init
 
 `init` enables the Hermes webhook platform (backs up your config first), installs the agent plugin, registers the daemon to start at login, and auto-registers the MCP tool surface into Claude Code / Codex if it finds them on this machine. Everything is confirmed on screen and reversible; `--yes` accepts defaults.
 
+### The daemon's own runtime
+
+`daemon install` does **not** adopt the interpreter you happened to run it
+from. It provisions (or repairs) an app-owned venv under
+`~/.galvanize/runtime/venv`, validates it *launch-equivalently* (spawned
+isolated, at the launch working directory, with `PYTHONPATH`/user-site
+scrubbed: imports, package versions, a real OS-keyring set/get/delete
+roundtrip, windowless target), and records the result in
+`~/.galvanize/install.json`. Only that recorded, probed identity goes into
+the persistence entries (Startup `.lnk`, watchdog task, systemd unit,
+LaunchAgent). Falling back to your invoker's interpreter requires passing
+the same probe, and install says so out loud; a failed probe changes
+nothing on disk. `galvanize probe` prints the manifest for this
+interpreter; `galvanize doctor` diffs install.json vs the persistence
+target vs the live daemon three ways.
+
+Testing/automation seams (env vars): `GALVANIZE_RUNTIME_VENV` (location),
+`GALVANIZE_RUNTIME_DISABLE=1` (skip the app venv entirely),
+`GALVANIZE_RUNTIME_SKIP_PROVISION=1` (validate, never pip),
+`GALVANIZE_INSTALL_INTERP=<exe>` (override the fallback candidate).
+
 After that, the whole surface is five verbs:
 
 ```bash
@@ -85,6 +106,14 @@ galvanize add folder ~/watch --wake shell --command 'myagent run "{prompt}"'
 
 Commands containing `{prompt}` or `{payload}` run as an executable plus literal arguments. Event text is never interpolated into a shell command. Use a script for pipelines or redirection, and read `GALVANIZE_PROMPT` / `GALVANIZE_PAYLOAD` inside it. On Windows, npm command shims are resolved to their Node entry point; other batch files need an explicit executable or interpreter.
 
+Shell wakes run invisibly on Windows: every child is spawned through one
+launch primitive (`galvanize/winlaunch.py`) with a hidden console inside a
+kill-on-close Job Object, so no window ever appears and a timeout or a
+surviving descendant takes the whole process tree down with it. The honest
+limit: invisibility covers CONSOLE windows only — a shell wake executes
+user-declared commands, and any GUI descendant (an editor, a message box,
+an Electron app) can still draw its own window.
+
 ### Relay webhooks
 
 DSH and other shell wakes require a relay for webhooks. Deploy `relay/worker.js` with a `RELAY` KV binding and two distinct secrets: `RELAY_TOKEN` for the daemon to read events, and `INGEST_TOKEN` for senders to submit events. Set both using `wrangler secret put` before deploying.
@@ -133,7 +162,7 @@ or fetching mail, then re-enters IDLE after draining.
 
 ## Daily use
 
-The agent's own `trigger_add` tool is the primary creation path; the CLI is the fallback for use without an agent. Both write the same `~/.galvanize/triggers.yaml`, and the dashboard tab manages what either creates.
+The agent's own `trigger_add` tool is the primary creation path; the CLI is the fallback for use without an agent. Every editor — agent tool, CLI, dashboard, `galvanize serve` — writes through the same transactional SQLite authority (`~/.galvanize/galvanize.db`) with config revisions, so concurrent edits cannot silently clobber each other. `~/.galvanize/triggers.yaml` is an import/export mirror (and the first-seed source): hand-edit it, then `galvanize config import triggers.yaml` to activate, or `config export` to start fresh from the live set.
 
 ### Wake sessions & tool access
 

@@ -15,11 +15,29 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
 
 logger = logging.getLogger(__name__)
+
+
+def _bootstrap_run(cmd, *, timeout):
+    """subprocess.run for the CLI-fallback branches (audit F6).
+
+    These sites run exactly when `import galvanize` FAILED in this process,
+    so the winlaunch primitive is by definition unreachable from here; the
+    CREATE_NO_WINDOW flag is therefore set literally. Hidden-console flavor
+    (winlaunch docstring): under the Win11 WT default terminal, an unflagged
+    console child from a windowless gateway pops a visible window.
+    Allowlisted with this justification in tests/test_launch_primitive_ast.py.
+    """
+    kw = {}
+    if os.name == "nt":
+        kw["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                          encoding="utf-8", errors="replace", **kw)
 
 
 def _run_op(op: str, **kwargs):
@@ -79,8 +97,7 @@ def _run_op(op: str, **kwargs):
             if kwargs.get("payload"):
                 cmd += ["--payload", json.dumps(kwargs["payload"])]
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
-                                  encoding="utf-8", errors="replace")
+            proc = _bootstrap_run(cmd, timeout=60)
             return {"ok": proc.returncode == 0,
                     "output": (proc.stdout or proc.stderr)[-3000:]}
         except Exception as e:
@@ -276,8 +293,7 @@ def _cli_handle_triggers(args) -> None:
         if verb0 == "test":
             argv = [shim, "test", getattr(args, "name", "") or ""]
         try:
-            p = subprocess.run(argv, capture_output=True, text=True, timeout=60,
-                               encoding="utf-8", errors="replace")
+            p = _bootstrap_run(argv, timeout=60)
         except Exception as e:
             print(f"galvanize CLI fallback failed: {e}")
             raise SystemExit(1)

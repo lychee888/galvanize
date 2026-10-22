@@ -169,8 +169,18 @@ def test_f2_probe_runs_once_per_process(monkeypatch):
 def test_f2_probe_key_is_pid_scoped(monkeypatch):
     rec = install_fake_keyring(monkeypatch)
     assert secrets._keyring_backend_ok() is True
-    assert rec["sets"] == [f"__probe__{os.getpid()}"], \
-        "probe must use a per-process key, never a shared '__probe__'"
+    import re
+    assert rec["sets"] == [k for k in rec["sets"]] and len(rec["sets"]) == 1
+    assert re.fullmatch(rf"__probe__{os.getpid()}\.[0-9a-f]{{4,}}",
+                        rec["sets"][0]), rec["sets"]
+    # C4: within one process, concurrent probes must not even share the
+    # pid key — each call gets a unique credential (WinVaultKeyring loses
+    # raced set/get on the same or distinct keys inside one process).
+    rec["sets"].clear()
+    secrets.keyring_status()
+    secrets.keyring_status()
+    assert len(set(rec["sets"])) == len(rec["sets"]) > 0
+    assert all(k.startswith(f"__probe__{os.getpid()}.") for k in rec["sets"])
 
 
 def test_f2_delete_failure_is_non_fatal(monkeypatch):
@@ -207,10 +217,12 @@ def test_f2_concurrent_gets_never_miss(monkeypatch):
 # --------------------------------------------------------------------------
 
 def _age_health_file(key, seconds):
-    p = state._health_path(key)
-    h = json.loads(p.read_text(encoding="utf-8"))
-    h["ts"] = time.time() - seconds
-    p.write_text(json.dumps(h), encoding="utf-8")
+    # C5: source health is a galvanize.db row, not a source-*.json file.
+    from galvanize import store
+    row = store.source_health_row(key)
+    assert row is not None, f"no health row for {key}"
+    store.set_source_health(key, row["connected"], row["error"],
+                            pid=row["pid"], ts=time.time() - seconds)
 
 
 def test_f3_error_survives_window_when_writer_is_live():

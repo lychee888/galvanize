@@ -13,10 +13,11 @@ environment (an agent woken by this very hook must not re-fire it).
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
+
+from .. import winlaunch
 
 _HOOK_SH = """#!/bin/sh
 # galvanize trigger '{name}' — managed file; re-add with `galvanize add git-hook`
@@ -51,8 +52,8 @@ def default_emitter() -> str:
 
 def repo_root(path: str) -> Optional[Path]:
     try:
-        r = subprocess.run(["git", "-C", str(path), "rev-parse", "--show-toplevel"],
-                           capture_output=True, text=True, timeout=10)
+        r = winlaunch.run(["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+                          timeout=10)
         if r.returncode == 0:
             return Path(r.stdout.strip())
     except Exception:
