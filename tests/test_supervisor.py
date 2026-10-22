@@ -362,9 +362,10 @@ def test_worker_adopts_heartbeat_of_dead_predecessor(isolated_homes):
     _st.set_heartbeat(pid=dead)     # dead predecessor owns the beat ROW
     env = dict(os.environ, GALVANIZE_READY_TOKEN="adopt-probe",
                GALVANIZE_SUPERVISED="1")
+    errf = open(home / "adopt_child_stderr.log", "w+", encoding="utf-8")
     p = subprocess.Popen([sys.executable, "-m", "galvanize.cli", "run"],
                          env=env, cwd=REPO,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                         stdout=subprocess.DEVNULL, stderr=errf)
     try:
         ok = wait_until(lambda: (sup.read_ready(home) or {}).get("token")
                         == "adopt-probe", 30)
@@ -376,12 +377,20 @@ def test_worker_adopts_heartbeat_of_dead_predecessor(isolated_homes):
                     encoding="utf-8", errors="replace")[-800:]
             except OSError:
                 why = "(no daemon log)"
+            try:
+                err = errf.seek(0) or errf.read()[-800:]
+            except OSError:
+                err = "(no stderr)"
             assert False, ("supervised worker never posted READY over a dead "
-                           f"predecessor's beat; child log tail:\n{why}")
+                           f"predecessor's beat; rc={p.poll()} "
+                           f"home_files={sorted(q.name for q in home.iterdir())}; "
+                           f"child log tail:\n{why}\nchild stderr tail:\n{err}")
         r = sup.read_ready(home)
         assert r["pid"] not in (dead,) and r["capabilities"]
     finally:
         _kill_tree(p.pid)
+        p.wait(timeout=10)
+        errf.close()
 
 
 def test_worker_still_refuses_alive_legacy_daemon(isolated_homes):
