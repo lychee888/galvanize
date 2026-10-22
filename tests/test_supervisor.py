@@ -343,13 +343,23 @@ def _kill_tree(pid):
         os.kill(pid, signal.SIGKILL)
 
 
+def _dead_pid():
+    """A pid that is DEAD BY FACT on every platform, not by range guess:
+    spawn a no-op child and reap it. (999999 'looked' alive on macOS:
+    out-of-range pids answer EPERM, not ESRCH, to signal 0.)"""
+    q = subprocess.Popen([sys.executable, "-c", "pass"])
+    q.wait()
+    return q.pid
+
+
 def test_worker_adopts_heartbeat_of_dead_predecessor(isolated_homes):
     """Drill defect (2026-10-21 21:22): a SIGKILLed worker left a beat that
     is fresh-by-age but dead-by-pid; the respawn must TAKE OVER, not stew
     in backoff for 60s. Refusal requires actual pid liveness."""
     home = isolated_homes["galvanize"]
     from galvanize import store as _st
-    _st.set_heartbeat(pid=999999)   # dead predecessor owns the beat ROW
+    dead = _dead_pid()              # reaped child: dead on every OS
+    _st.set_heartbeat(pid=dead)     # dead predecessor owns the beat ROW
     env = dict(os.environ, GALVANIZE_READY_TOKEN="adopt-probe",
                GALVANIZE_SUPERVISED="1")
     p = subprocess.Popen([sys.executable, "-m", "galvanize.cli", "run"],
@@ -358,9 +368,18 @@ def test_worker_adopts_heartbeat_of_dead_predecessor(isolated_homes):
     try:
         ok = wait_until(lambda: (sup.read_ready(home) or {}).get("token")
                         == "adopt-probe", 30)
-        assert ok, "supervised worker refused over a dead predecessor's beat"
+        if not ok:
+            # the child logged WHY (refused? crashed?) into its isolated
+            # home; DEVNULL'd pipes must not mean flying blind on remote OSes
+            try:
+                why = (home / "galvanize.log").read_text(
+                    encoding="utf-8", errors="replace")[-800:]
+            except OSError:
+                why = "(no daemon log)"
+            assert False, ("supervised worker never posted READY over a dead "
+                           f"predecessor's beat; child log tail:\n{why}")
         r = sup.read_ready(home)
-        assert r["pid"] not in (999999,) and r["capabilities"]
+        assert r["pid"] not in (dead,) and r["capabilities"]
     finally:
         _kill_tree(p.pid)
 
